@@ -226,3 +226,88 @@ export function cloneFlatFileMap(fileMap: FlatFileMap): FlatFileMap {
   }
   return result
 }
+
+/**
+ * 去掉 File 引用，只保留可序列化的元数据。
+ */
+export function toMetaFileMap(fileMap: FlatFileMap): FlatFileMap {
+  const result: FlatFileMap = {}
+  for (const [key, value] of Object.entries(fileMap)) {
+    result[key] = {
+      paths: [...value.paths],
+      size: value.size,
+      lastModified: value.lastModified
+    }
+  }
+  return result
+}
+
+export type LinkType = 'lan' | 'wan' | 'unknown'
+
+export interface RoomMember {
+  id: string
+  user: UserInfo
+  isConnected: boolean
+  isConnecting: boolean
+  linkType: LinkType
+}
+
+export interface ChatMessage {
+  id: string
+  fromId: string
+  fromNickname: string
+  text: string
+  ts: number
+  isSelf: boolean
+  isSystem?: boolean
+  isPrivate?: boolean
+  toId?: string
+  toNickname?: string
+}
+
+export interface FileOffer {
+  offerId: string
+  from: UserInfo
+  fromPeerId: string
+  payload: FilesPayload
+}
+
+export type RoomTransferPhase = 'idle' | 'waitingAccept' | 'sending' | 'receiving'
+
+export interface RoomCurrentFileState {
+  name: string
+  size: number
+  transmittedBytes: number
+  lastBytes: number
+  speed: number
+  chunks: ArrayBuffer[]
+}
+
+export interface RoomStatusState {
+  isConnecting: boolean
+  isConnectServer: boolean
+  isConnectPeer: boolean
+  isPeerConnecting: boolean
+  error: MessageState
+}
+
+export function createRoomCurrentFileState(): RoomCurrentFileState {
+  return {
+    name: '',
+    size: 0,
+    transmittedBytes: 0,
+    lastBytes: 0,
+    speed: 0,
+    chunks: []
+  }
+}
+
+export function createRoomStatusState(): RoomStatusState {
+  return {
+    isConnecting: true,
+    isConnectServer: false,
+    isConnectPeer: false,
+    isPeerConnecting: false,
+    error: createMessageState()
+  }
+}

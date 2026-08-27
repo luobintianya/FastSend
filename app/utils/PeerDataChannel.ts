@@ -122,38 +122,59 @@ export class PeerDataChannel {
    * @param data 要发送的数据
    */
   public async sendData(data: ArrayBuffer | string): Promise<void> {
-    if (!this.dc) {
+    if (!this.dc || this.dc.readyState !== 'open') {
       throw new Error('Data channel not initialized')
     }
 
     return new Promise<void>((resolve, reject) => {
       this.sendPromiseReject = reject
       const dc = this.dc!
-      dc.bufferedAmountLowThreshold = 0
       const count = Math.ceil(
         (typeof data === 'string' ? data.length : data.byteLength) / this.blockSize
       )
       let offset = 0
+      let settled = false
 
-      dc.onbufferedamountlow = () => {
-        if (count - offset > 16) {
-          dc.bufferedAmountLowThreshold = 16 * this.blockSize
-        } else {
-          dc.bufferedAmountLowThreshold = 0
+      const done = (error?: Error) => {
+        if (settled) {
+          return
         }
-        for (let i = 0; i < 32; i++) {
-          if (offset < count) {
-            const chunk = data.slice(this.blockSize * offset, this.blockSize * (offset + 1))
-            dc.send(<string>chunk)
-            offset++
-            if (offset >= count) {
-              resolve()
-              break
-            }
-          }
+        settled = true
+        dc.onbufferedamountlow = null
+        this.sendPromiseReject = null
+        if (error) {
+          reject(error)
+        } else {
+          resolve()
         }
       }
-      dc.send(JSON.stringify({ count, type: typeof data }))
+
+      const pump = () => {
+        if (settled) {
+          return
+        }
+        try {
+          dc.bufferedAmountLowThreshold = count - offset > 16 ? 16 * this.blockSize : 0
+          while (offset < count && dc.bufferedAmount <= 32 * this.blockSize) {
+            const chunk = data.slice(this.blockSize * offset, this.blockSize * (offset + 1))
+            dc.send(chunk as string)
+            offset++
+          }
+          if (offset >= count) {
+            done()
+          }
+        } catch (error) {
+          done(error instanceof Error ? error : new Error('Data channel send failed'))
+        }
+      }
+
+      dc.onbufferedamountlow = pump
+      try {
+        dc.send(JSON.stringify({ count, type: typeof data }))
+        pump()
+      } catch (error) {
+        done(error instanceof Error ? error : new Error('Data channel send failed'))
+      }
     })
   }
 
@@ -203,8 +224,15 @@ export class PeerDataChannel {
    * 检查连接是否断开
    * @returns 如果连接则为 True，否则为 false
    */
-  public isConnected(): boolean {
-    return this.pc.connectionState === 'connected'
+  public isDataChannelOpen(): boolean {
+    return this.dc?.readyState === 'open'
+  }
+
+  /**
+   * 暴露底层 PeerConnection，用于检测局域网 / 公网路径。
+   */
+  public getRTCPeerConnection(): RTCPeerConnection {
+    return this.pc
   }
 
   /**

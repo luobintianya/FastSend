@@ -4,7 +4,7 @@ export default defineI18nConfig(() => ({
   messages: {
     en: {
       welcome: 'Welcome',
-      description: 'Fast peer-to-peer file and directory transfers',
+      description: 'Join a room, share the link, and send messages or files when both are online',
       home: 'Home',
       sender: 'Sender',
       recipient: 'Recipient',
@@ -22,8 +22,31 @@ export default defineI18nConfig(() => ({
         transmitted: 'Transmitted',
         times: 'times',
         totalProgress: 'Total progress',
-        autoConfirmBySender: 'Auto confirm by sender',
-        dragHereToSendFile: 'Drag here to send the file'
+        autoConfirmBySender: 'Auto accept incoming files',
+        dragHereToSendFile: 'Drag here to send the file',
+        roomCode: 'Room code',
+        waitingPeer: 'Waiting for the other person to join',
+        you: 'You',
+        nickname: 'Nickname',
+        clickToEditName: 'Click to edit your name',
+        online: 'Online',
+        offline: 'Offline',
+        sendMessage: 'Message',
+        chat: 'Chat',
+        messagePlaceholder: 'Type a message',
+        chatEveryone: 'Everyone',
+        chatPrivateTo: 'Private to {name}',
+        privateMessage: 'Private',
+        incomingFile: 'Incoming file',
+        incomingFolder: 'Incoming folder',
+        folder: 'Folder',
+        fileCount: '{count} files',
+        connectingPeer: 'Establishing peer connection',
+        p2pReady: 'Peer connected',
+        shareToJoin: 'Share this link. Anyone who opens it will join this room.',
+        lan: 'LAN',
+        wan: 'Internet',
+        onlineCount: '{count} online'
       },
       btn: {
         submit: 'Submit',
@@ -42,7 +65,11 @@ export default defineI18nConfig(() => ({
         syncDir: 'Folder synchronization',
         selectDir: 'Select folder',
         toHome: 'Back to home',
-        terminate: 'Terminate'
+        terminate: 'Terminate',
+        newRoom: 'New room',
+        sendMessage: 'Send message',
+        accept: 'Receive',
+        decline: 'Decline'
       },
       hint: {
         noModernFileAPIWarn:
@@ -71,12 +98,26 @@ export default defineI18nConfig(() => ({
         pleaseSelectUpdate: 'Please select the file to update',
         pleaseSelectDelete: 'Please select the file to delete',
         syncDiffFailed: 'Directory comparison failed, please try again',
-        quickDiffMode: 'Quick mode (compare size & date only)'
+        quickDiffMode: 'Quick mode (compare size & date only)',
+        roomFull: 'This room is full. Create a new room or wait.',
+        peerJoined: 'The other person is online',
+        peerJoinedNamed: '{name} is online',
+        peerLeft: 'The other person has left',
+        peerLeftNamed: '{name} has left',
+        linkCopied: 'Link copied',
+        fileRejected: 'The other party declined the transfer',
+        waitingAccept: 'Waiting for the other party to accept',
+        confirmReceiveFile: 'wants to send you a file. Receive it?',
+        confirmReceiveFolder: 'wants to send you a folder. Receive it?',
+        noFileSelected: 'No file selected',
+        emptyFolder: 'The folder is empty',
+        fileNotFound: 'File not found',
+        selectPeerToSend: 'Choose a person to send the file to'
       }
     },
     zh: {
       welcome: '欢迎',
-      description: '点对点快速传输文件和目录',
+      description: '进入房间，分享链接，双方在线后即可互发消息和文件',
       home: '主页',
       sender: '发送',
       recipient: '接收',
@@ -94,8 +135,31 @@ export default defineI18nConfig(() => ({
         transmitted: '已传输',
         times: '次',
         totalProgress: '总进度',
-        autoConfirmBySender: '发送方自动确认',
-        dragHereToSendFile: '拖动到此处发送文件'
+        autoConfirmBySender: '自动接收文件',
+        dragHereToSendFile: '拖动到此处发送文件',
+        roomCode: '房间编码',
+        waitingPeer: '等待对方加入',
+        you: '我',
+        nickname: '昵称',
+        clickToEditName: '点击修改你的名称',
+        online: '在线',
+        offline: '离线',
+        sendMessage: '发消息',
+        chat: '聊天',
+        messagePlaceholder: '输入消息',
+        chatEveryone: '所有人',
+        chatPrivateTo: '私信 {name}',
+        privateMessage: '私信',
+        incomingFile: '收到文件',
+        incomingFolder: '收到文件夹',
+        folder: '文件夹',
+        fileCount: '{count} 个文件',
+        connectingPeer: '正在建立点对点连接',
+        p2pReady: '点对点已连接',
+        shareToJoin: '分享此链接，对方打开后即可进入同一房间。',
+        lan: '局域网',
+        wan: '公网',
+        onlineCount: '{count} 人在线'
       },
       btn: {
         submit: '提交',
@@ -114,7 +178,11 @@ export default defineI18nConfig(() => ({
         syncDir: '目录同步',
         selectDir: '选择目录',
         toHome: '回首页',
-        terminate: '终止'
+        terminate: '终止',
+        newRoom: '新房间',
+        sendMessage: '发送消息',
+        accept: '接收',
+        decline: '拒绝'
       },
       hint: {
         noModernFileAPIWarn:
@@ -142,7 +210,21 @@ export default defineI18nConfig(() => ({
         pleaseSelectUpdate: '请选择要更新的文件',
         pleaseSelectDelete: '请选择要删除的文件',
         syncDiffFailed: '目录对比失败，请重试',
-        quickDiffMode: '快速模式（仅比较大小和日期）'
+        quickDiffMode: '快速模式（仅比较大小和日期）',
+        roomFull: '房间已满，请创建新房间或稍后再试',
+        peerJoined: '对方已上线',
+        peerJoinedNamed: '{name} 已上线',
+        peerLeft: '对方已离开',
+        peerLeftNamed: '{name} 已离开',
+        linkCopied: '链接已复制',
+        fileRejected: '对方拒绝接收',
+        waitingAccept: '等待对方确认接收',
+        confirmReceiveFile: '想发给你一个文件，是否接收？',
+        confirmReceiveFolder: '想发给你一个文件夹，是否接收？',
+        noFileSelected: '未选择文件',
+        emptyFolder: '目录为空',
+        fileNotFound: '文件找不到',
+        selectPeerToSend: '请选择要发送的对象'
       }
     }
   }

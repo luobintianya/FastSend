@@ -46,16 +46,21 @@ onMounted(() => {
           你的文件数据不会经过第三方服务器，保证隐私安全，相应的，需要发送方在传输过程中保持在线
         </p>
         <h2>一、快速上手</h2>
-        <h3>发送单个文件</h3>
-        <p>1. 发送方点击<b>发送文件</b>，获取文件<b>取件码</b>（也可将文件拖放到发送区域）</p>
-        <p>2. 接收方输入<b>取件码</b>开始点对点配对，配对成功后等待发送方确认</p>
-        <p>3. 发送方点击<b>确认</b>继续传输（可点开头像设置自动确认）</p>
+        <h3>进入房间</h3>
+        <p>
+          1. 打开网站后会自动进入一个<strong>随机房间</strong>，页面会显示房间编码和分享链接
+        </p>
+        <p>2. 把链接发给对方，对方打开后即可进入同一房间，双方会显示为在线</p>
+        <p>
+          3.
+          在对方名称旁边可以选择<strong>发消息</strong>、<strong>发送文件</strong>或<strong>发送文件夹</strong>
+        </p>
         <p>
           4.
-          接收方点击<b>接收</b>，选择保存路径，然后开始传输（如果浏览器不支持直接访问文件系统，数据将暂存在内存中，传输完毕后触发下载）
+          对方会弹出确认框，点击<strong>接收</strong>并选择保存位置后开始点对点传输（可点开头像开启自动接收文件）
         </p>
         <h3>发送目录</h3>
-        <p>发送方点击<b>发送目录</b>，其他步骤同上（目录暂不支持直接拖放）</p>
+        <p>点击对方名称旁的<strong>发送目录</strong>，其他步骤同上（目录暂不支持直接拖放）</p>
         <h2>二、工作原理</h2>
         <p>
           本工具使用<b>WebRTC</b>提供点对点数据传输，使用<b>现代文件访问API</b>提供直接文件系统读写
@@ -115,28 +120,25 @@ onMounted(() => {
           Accordingly, the sender needs to remain online during the transfer.
         </p>
         <h2>I. Quick Start</h2>
-        <h3>Send a Single File</h3>
+        <h3>Join a Room</h3>
         <p>
-          1. The sender clicks <b>Send File</b> to obtain the <b>Pickup Code</b> (files can also be
-          dragged and dropped into the sending area).
+          1. Opening the site automatically puts you in a <b>random room</b> with a room code and
+          shareable link.
+        </p>
+        <p>2. Send the link to the other person. When they open it, both of you appear online.</p>
+        <p>
+          3. Next to the other person's name, you can <b>send a message</b>, <b>send a file</b>, or
+          <b>send a folder</b>.
         </p>
         <p>
-          2. The receiver enters the <b>Pickup Code</b> to start peer-to-peer pairing, and waits for
-          the sender to confirm after successful pairing.
-        </p>
-        <p>
-          3. The sender clicks <b>Confirm</b> to continue the transfer (the sender can open their
-          profile picture to set automatic confirmation).
-        </p>
-        <p>
-          4. The receiver clicks <b>Receive</b>, selects the save path, and then starts the transfer
-          (if the browser does not support direct access to the file system, data will temporarily
-          reside in memory, triggering a download after the transfer is complete).
+          4. The other person sees a confirmation dialog. After they click <b>Receive</b> and choose
+          a save location, the peer-to-peer transfer starts (you can open your avatar menu to enable
+          auto-accept).
         </p>
         <h3>Send a Directory</h3>
         <p>
-          The sender clicks <b>Send Directory</b>, and the other steps are the same (directories do
-          not currently support direct drag and drop).
+          Click <b>Send folder</b> next to the other person. The remaining steps are the same
+          (directories do not currently support drag and drop).
         </p>
         <h2>II. How It Works</h2>
         <p>

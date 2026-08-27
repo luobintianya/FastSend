@@ -65,6 +65,39 @@ export function genRandomString(length: number): string {
   return randomString
 }
 
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+
+/**
+ * 生成房间编码（避开易混淆字符）
+ */
+export function genRoomCode(length = 6): string {
+  let code = ''
+  for (let i = 0; i < length; i++) {
+    code += ROOM_CODE_CHARS.charAt(Math.floor(Math.random() * ROOM_CODE_CHARS.length))
+  }
+  return code
+}
+
+/**
+ * 校验房间编码
+ */
+export function isValidRoomCode(code: string): boolean {
+  return /^[A-Z0-9]{4,8}$/i.test(code)
+}
+
+export function getClientId(): string {
+  if (!import.meta.client) {
+    return ''
+  }
+  const key = 'fastsendClientId'
+  let id = localStorage.getItem(key)
+  if (!id) {
+    id = genRandomString(16)
+    localStorage.setItem(key, id)
+  }
+  return id
+}
+
 /**
  * 选择头像图片
  * @param cb 回调
