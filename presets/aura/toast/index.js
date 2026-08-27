@@ -1,11 +1,15 @@
 export default {
     root: ({ props }) => ({
         class: [
-            //Size and Shape
-            'w-96 rounded-md',
-
-            // Positioning
-            { '-translate-x-2/4': props.position == 'top-center' || props.position == 'bottom-center' }
+            'fixed z-[9999] p-4 w-96 rounded-md',
+            {
+                'top-0 right-0': props.position == 'top-right',
+                'top-0 left-0': props.position == 'top-left',
+                'top-0 left-1/2 -translate-x-2/4': props.position == 'top-center',
+                'bottom-0 right-0': props.position == 'bottom-right',
+                'bottom-0 left-0': props.position == 'bottom-left',
+                'bottom-0 left-1/2 -translate-x-2/4': props.position == 'bottom-center'
+            }
         ]
     }),
     message: ({ props }) => ({

@@ -86,11 +86,23 @@ export const useRoomStore = defineStore('room', () => {
 
   const localePath = useLocalePath()
 
+  function resolveShareHref(path: string) {
+    const resolved = localePath(path) as string | { path?: string; fullPath?: string }
+    if (typeof resolved === 'string') {
+      return resolved
+    }
+    return resolved?.fullPath || resolved?.path || path
+  }
+
   const shareLink = computed(() => {
     if (!import.meta.client || !roomCode.value) {
       return ''
     }
-    return `${location.origin}${localePath(`/room/${roomCode.value}`)}`
+    const href = resolveShareHref(`/room/${roomCode.value}`)
+    if (/^https?:\/\//.test(href)) {
+      return href
+    }
+    return `${location.origin}${href}`
   })
 
   const isBusy = computed(() => transferPhase.value !== 'idle')
@@ -1112,14 +1124,15 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   async function copyLink() {
-    if (!shareLink.value) {
+    const link = shareLink.value
+    if (!link) {
       return
     }
-    await copyToClipboard(shareLink.value)
+    const ok = await copyToClipboard(link)
     toast.add({
-      severity: 'success',
-      summary: 'Success',
-      detail: t('hint.linkCopied'),
+      severity: ok ? 'success' : 'error',
+      summary: ok ? 'Success' : 'Error',
+      detail: ok ? t('hint.linkCopied') : t('hint.serviceUnavailable'),
       life: 3e3
     })
   }

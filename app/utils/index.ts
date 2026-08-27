@@ -183,37 +183,68 @@ export function doDownloadFromBlob(blob: Blob | File, filename: string) {
   URL.revokeObjectURL(objUrl)
 }
 
-export async function copyToClipboard(content: string | ImageData): Promise<void> {
-  // Check if the environment is SSR
-  if (typeof window === 'undefined' || typeof navigator === 'undefined' || !navigator.clipboard) {
-    return
+function copyTextFallback(text: string): boolean {
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', '')
+  el.style.position = 'fixed'
+  el.style.top = '0'
+  el.style.left = '-9999px'
+  document.body.appendChild(el)
+  el.select()
+  el.setSelectionRange(0, text.length)
+  const ok = document.execCommand('copy')
+  document.body.removeChild(el)
+  return ok
+}
+
+export async function copyToClipboard(content: string | ImageData): Promise<boolean> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return false
   }
 
   try {
     if (typeof content === 'string') {
-      await navigator.clipboard.writeText(content)
-    } else {
-      const canvas = document.createElement('canvas')
-      canvas.width = content.width
-      canvas.height = content.height
-      const context = canvas.getContext('2d')
-
-      if (!context) {
-        throw new Error('Failed to get canvas context')
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content)
+        return true
       }
-
-      context.putImageData(content, 0, 0)
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve))
-
-      if (!blob) {
-        throw new Error('Failed to create blob from canvas')
-      }
-
-      const item = new ClipboardItem({ 'image/png': blob })
-      await navigator.clipboard.write([item])
+      return copyTextFallback(content)
     }
+
+    const canvas = document.createElement('canvas')
+    canvas.width = content.width
+    canvas.height = content.height
+    const context = canvas.getContext('2d')
+
+    if (!context) {
+      throw new Error('Failed to get canvas context')
+    }
+
+    context.putImageData(content, 0, 0)
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve))
+
+    if (!blob) {
+      throw new Error('Failed to create blob from canvas')
+    }
+
+    if (!navigator.clipboard?.write) {
+      return false
+    }
+    const item = new ClipboardItem({ 'image/png': blob })
+    await navigator.clipboard.write([item])
+    return true
   } catch (error) {
+    if (typeof content === 'string') {
+      try {
+        return copyTextFallback(content)
+      } catch {
+        console.warn(error)
+        return false
+      }
+    }
     console.warn(error)
+    return false
   }
 }
 
