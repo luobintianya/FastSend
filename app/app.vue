@@ -32,7 +32,6 @@ onMounted(() => {
   <Toast position="top-right" />
   <NavBar />
   <NuxtPage />
-  <AppFooter />
   <ScrollTop />
   <InstallPWA />
   <DocPanel />

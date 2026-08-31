@@ -273,8 +273,7 @@ export const pubStunList = [
 
 export const pubTurnList = []
 
-export const pubIceServers: RTCIceServer[] = pubStunList
-  .map((i) => ({
-    urls: 'stun:' + i
-  }))
-  .concat(pubTurnList)
+export const pubIceServers: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun.cloudflare.com:3478' }
+]

@@ -1,17 +1,62 @@
+import { inspectWebRTCLink, LINK_RANK } from '~/utils/webrtcLink'
+
 /**
  * PeerDataChannel 配置类
  */
 interface PeerDataChannelConfig {
   iceServers?: RTCIceServer[]
+  tcpIceServers?: RTCIceServer[]
   blockSize?: number
   initializeDataChannel?: boolean
+  /** 碰撞时让步的一方。房间 mesh 里 ID 较小的为 polite */
+  polite?: boolean
+  /** 允许 ICE 使用 TCP / TURN TCP。默认关闭，避免跨网落到数 KB/s 的 TCP 中继 */
+  allowTcp?: boolean
+  /** DataChannel 仍未打开时，再过多久启用 TURN TCP */
+  tcpAfterMs?: number
+}
+
+function isTcpCandidate(candidate?: string | null): boolean {
+  return /(^| )tcp( |$)/i.test(candidate || '')
+}
+
+function stripTcpCandidates(sdp?: string): string | undefined {
+  if (!sdp) {
+    return sdp
+  }
+  return sdp
+    .split(/\r?\n/)
+    .filter((line) => !/^a=candidate:/i.test(line) || !isTcpCandidate(line))
+    .join('\r\n')
+}
+
+function concatBinary(chunks: Array<string | ArrayBuffer>): ArrayBuffer {
+  const views: Uint8Array[] = []
+  let total = 0
+  for (const chunk of chunks) {
+    if (typeof chunk === 'string') {
+      continue
+    }
+    const view = chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : new Uint8Array()
+    views.push(view)
+    total += view.byteLength
+  }
+  const out = new Uint8Array(total)
+  let offset = 0
+  for (const view of views) {
+    out.set(view, offset)
+    offset += view.byteLength
+  }
+  return out.buffer
 }
 
 /**
  * 封装用于点对点数据传输的 WebRTC 数据通道
  */
 export class PeerDataChannel {
-  private static readonly DEFAULT_BLOCK_SIZE = 32768
+  private static readonly DEFAULT_BLOCK_SIZE = 65536
+  private static readonly MAX_BUFFERED = 2 * 1024 * 1024
+  private static readonly LOW_WATER = 512 * 1024
 
   private pc: RTCPeerConnection
   private dc: RTCDataChannel | null = null
@@ -23,8 +68,22 @@ export class PeerDataChannel {
     chunks: (string | ArrayBuffer)[]
   } = { startTime: 0, offset: 0, count: 0, type: '', chunks: [] }
   private sendPromiseReject: ((reason?: any) => void) | null = null
-  private eventQueue: EventQueue<ArrayBuffer | string>
   private blockSize: number
+  private isInitiator: boolean
+  private polite: boolean
+  private allowTcp: boolean
+  private tcpIceServers?: RTCIceServer[]
+  private tcpTimer?: ReturnType<typeof setTimeout>
+  private upgrading = false
+  private makingOffer = false
+  private ignoreOffer = false
+  private disposed = false
+  private iceRestarted = false
+  private promotedRank = 0
+  private promotingDirect = false
+  private pathLocked = false
+  private promoteAttempts = 0
+  private receiveWriteChain: Promise<void> = Promise.resolve()
 
   public onReceive: (
     data: ArrayBuffer | string,
@@ -43,20 +102,45 @@ export class PeerDataChannel {
    */
   constructor(config: PeerDataChannelConfig = {}) {
     this.blockSize = config.blockSize || PeerDataChannel.DEFAULT_BLOCK_SIZE
-    this.eventQueue = new EventQueue(this.onData.bind(this))
-    this.pc = new RTCPeerConnection({ iceServers: config.iceServers })
+    this.isInitiator = !!config.initializeDataChannel
+    this.polite = config.polite ?? !this.isInitiator
+    this.allowTcp = !!config.allowTcp
+    this.tcpIceServers = config.tcpIceServers
+    this.pc = new RTCPeerConnection({
+      iceServers: config.iceServers,
+      iceCandidatePoolSize: 0,
+      bundlePolicy: 'max-bundle'
+    })
 
     this.setupPeerConnection()
 
-    if (config.initializeDataChannel) {
+    if (this.isInitiator) {
       this.initializeDataChannel()
+    }
+
+    const tcpAfter = config.tcpAfterMs ?? 8000
+    if (this.tcpIceServers?.length) {
+      this.tcpTimer = setTimeout(() => this.upgradeIce(this.tcpIceServers!, true), tcpAfter)
     }
   }
 
   private setupPeerConnection(): void {
     this.pc.ondatachannel = this.handleDataChannel.bind(this)
-    this.pc.onnegotiationneeded = this.reNegotiation.bind(this)
-    this.pc.onicecandidate = (e) => e.candidate && this.onICECandidate(e.candidate)
+    this.pc.onnegotiationneeded = () => {
+      this.reNegotiation().catch((e) => {
+        console.error(e)
+        this.onError(e instanceof Error ? e : new Error('Unknown error during renegotiation'))
+      })
+    }
+    this.pc.onicecandidate = (e) => {
+      if (!e.candidate) {
+        return
+      }
+      if (!this.allowTcp && isTcpCandidate(e.candidate.candidate)) {
+        return
+      }
+      this.onICECandidate(e.candidate)
+    }
     this.pc.onicecandidateerror = (e) => {
       // console.warn(e)
       // ingore
@@ -65,35 +149,106 @@ export class PeerDataChannel {
   }
 
   private handleDataChannel(e: RTCDataChannelEvent): void {
+    if (this.dc && this.dc.readyState === 'open') {
+      return
+    }
     this.dc = e.channel
     this.setupDataChannel()
   }
 
   private initializeDataChannel(): void {
-    this.dc = this.pc.createDataChannel('dc')
+    this.dc = this.pc.createDataChannel('dc', { ordered: true })
     this.setupDataChannel()
   }
 
   private setupDataChannel(): void {
     if (!this.dc) return
-    this.dc.bufferedAmountLowThreshold = 0
-    this.dc.onmessage = (e) => this.eventQueue.enqueue(e.data)
-    this.dc.onopen = () => this.onOpen()
-  }
-
-  private handleConnectionStateChange(): void {
-    if (['closed', 'disconnected', 'failed'].includes(this.pc.connectionState)) {
-      this.dispose()
-      this.onDispose()
-    } else if (this.pc.connectionState === 'connected') {
-      this.onConnected()
+    this.dc.binaryType = 'arraybuffer'
+    this.dc.bufferedAmountLowThreshold = PeerDataChannel.LOW_WATER
+    this.dc.onmessage = (e) => {
+      try {
+        this.handleIncoming(e.data)
+      } catch (error) {
+        console.error(error)
+        this.onError(error instanceof Error ? error : new Error('Data channel receive failed'))
+      }
+    }
+    this.dc.onopen = () => {
+      this.clearUpgradeTimers()
+      this.onOpen()
+    }
+    if (this.dc.readyState === 'open') {
+      this.clearUpgradeTimers()
+      this.onOpen()
     }
   }
 
-  private async onData(data: ArrayBuffer | string): Promise<void> {
+  private handleConnectionStateChange(): void {
+    const state = this.pc.connectionState
+    if (state === 'connected') {
+      this.upgrading = false
+      this.promotingDirect = false
+      this.onConnected()
+      return
+    }
+    if (this.dc?.readyState === 'open' && state !== 'failed' && state !== 'closed') {
+      return
+    }
+    if ((this.upgrading || this.promotingDirect) && state !== 'closed' && state !== 'failed') {
+      return
+    }
+    // disconnected 很常见（consent 检测、短暂丢包），浏览器会自己恢复。
+    // 这时 restartIce 反而会把已经通的局域网 / 公网直连打断。
+    if (state === 'failed') {
+      if (!this.iceRestarted && !this.disposed && !this.pathLocked) {
+        this.iceRestarted = true
+        try {
+          this.pc.restartIce()
+          return
+        } catch {
+          // fall through
+        }
+      }
+      this.teardown()
+      return
+    }
+    if (state === 'closed') {
+      this.teardown()
+    }
+  }
+
+  private upgradeIce(servers: RTCIceServer[], allowTcp: boolean): void {
+    if (this.disposed || this.dc?.readyState === 'open') {
+      return
+    }
+    this.allowTcp = allowTcp
+    this.upgrading = true
+    this.iceRestarted = true
+    try {
+      this.pc.setConfiguration({
+        iceServers: servers,
+        iceCandidatePoolSize: 0,
+        bundlePolicy: 'max-bundle'
+      })
+      this.pc.restartIce()
+    } catch (error) {
+      console.warn(error)
+      this.upgrading = false
+    }
+  }
+
+  private clearUpgradeTimers(): void {
+    if (this.tcpTimer) {
+      clearTimeout(this.tcpTimer)
+      this.tcpTimer = undefined
+    }
+  }
+
+  private handleIncoming(data: ArrayBuffer | string): void {
     const receiveData = this.receiveData
     if (receiveData.offset === receiveData.count) {
-      const dat = JSON.parse(data as string)
+      const text = typeof data === 'string' ? data : new TextDecoder().decode(data)
+      const dat = JSON.parse(text)
       this.receiveData = {
         startTime: Date.now(),
         offset: 0,
@@ -101,27 +256,45 @@ export class PeerDataChannel {
         type: dat.type,
         chunks: []
       }
-    } else {
-      receiveData.chunks.push(data)
-      receiveData.offset++
-      if (receiveData.offset === receiveData.count) {
-        const endTime = Date.now()
-        const b = new Blob(receiveData.chunks)
-        const result = receiveData.type === 'string' ? await b.text() : await b.arrayBuffer()
-        await this.onReceive(result, {
-          size: b.size,
-          duration: endTime - receiveData.startTime
-        })
-        receiveData.chunks = []
-      }
+      return
     }
+
+    receiveData.chunks.push(data)
+    receiveData.offset++
+    if (receiveData.offset !== receiveData.count) {
+      return
+    }
+
+    const chunks = receiveData.chunks
+    const type = receiveData.type
+    const startTime = receiveData.startTime
+    receiveData.chunks = []
+    this.receiveWriteChain = this.receiveWriteChain
+      .then(async () => {
+        const result = type === 'string' ? await new Blob(chunks).text() : concatBinary(chunks)
+        await this.onReceive(result, {
+          size: type === 'string' ? (result as string).length : (result as ArrayBuffer).byteLength,
+          duration: Date.now() - startTime
+        })
+      })
+      .catch((error) => {
+        console.error(error)
+        this.onError(error instanceof Error ? error : new Error('Data channel receive failed'))
+      })
+  }
+
+  private getSendBlockSize(): number {
+    return this.blockSize
   }
 
   /**
-   * 发送数据，注意只能串行调用
-   * @param data 要发送的数据
+   * 发送数据，注意只能串行调用。
+   * onProgress 报告已写入通道的 payload 字节（不含分帧头），实际出网量需再减去 bufferedAmount。
    */
-  public async sendData(data: ArrayBuffer | string): Promise<void> {
+  public async sendData(
+    data: ArrayBuffer | string,
+    onProgress?: (sentBytes: number) => void
+  ): Promise<void> {
     if (!this.dc || this.dc.readyState !== 'open') {
       throw new Error('Data channel not initialized')
     }
@@ -129,11 +302,20 @@ export class PeerDataChannel {
     return new Promise<void>((resolve, reject) => {
       this.sendPromiseReject = reject
       const dc = this.dc!
+      const payloadBytes = typeof data === 'string' ? 0 : data.byteLength
+      const blockSize = this.getSendBlockSize()
       const count = Math.ceil(
-        (typeof data === 'string' ? data.length : data.byteLength) / this.blockSize
+        (typeof data === 'string' ? data.length : data.byteLength) / blockSize
       )
       let offset = 0
       let settled = false
+
+      const reportProgress = () => {
+        if (!payloadBytes || !onProgress) {
+          return
+        }
+        onProgress(Math.min(payloadBytes, offset * blockSize))
+      }
 
       const done = (error?: Error) => {
         if (settled) {
@@ -145,6 +327,9 @@ export class PeerDataChannel {
         if (error) {
           reject(error)
         } else {
+          if (payloadBytes) {
+            onProgress?.(payloadBytes)
+          }
           resolve()
         }
       }
@@ -154,11 +339,12 @@ export class PeerDataChannel {
           return
         }
         try {
-          dc.bufferedAmountLowThreshold = count - offset > 16 ? 16 * this.blockSize : 0
-          while (offset < count && dc.bufferedAmount <= 32 * this.blockSize) {
-            const chunk = data.slice(this.blockSize * offset, this.blockSize * (offset + 1))
+          dc.bufferedAmountLowThreshold = PeerDataChannel.LOW_WATER
+          while (offset < count && dc.bufferedAmount < PeerDataChannel.MAX_BUFFERED) {
+            const chunk = data.slice(blockSize * offset, blockSize * (offset + 1))
             dc.send(chunk as string)
             offset++
+            reportProgress()
           }
           if (offset >= count) {
             done()
@@ -179,18 +365,29 @@ export class PeerDataChannel {
   }
 
   /**
-   * 重协商 SDP
+   * 重协商 SDP。仅发起方处理，避免 mesh 里双方同时 createOffer。
    */
   private async reNegotiation(): Promise<void> {
-    return this.pc
-      .createOffer()
-      .then((offer) => this.pc.setLocalDescription(offer))
-      .then(() => (this.pc.localDescription ? this.onSDP(this.pc.localDescription) : undefined))
-      .catch((e) => {
-        console.error(e)
-        this.onError(e instanceof Error ? e : new Error('Unknown error during renegotiation'))
-        this.dispose()
-      })
+    if (!this.isInitiator || this.makingOffer) {
+      return
+    }
+    try {
+      this.makingOffer = true
+      const offer = await this.pc.createOffer()
+      if (this.pc.signalingState !== 'stable') {
+        return
+      }
+      await this.pc.setLocalDescription(offer)
+      if (this.pc.localDescription) {
+        this.emitLocalDescription()
+      }
+    } catch (e) {
+      console.error(e)
+      this.onError(e instanceof Error ? e : new Error('Unknown error during renegotiation'))
+      this.teardown()
+    } finally {
+      this.makingOffer = false
+    }
   }
 
   /**
@@ -199,16 +396,29 @@ export class PeerDataChannel {
    */
   public async setRemoteSDP(sdp: RTCSessionDescriptionInit): Promise<void> {
     try {
-      await this.pc.setRemoteDescription(sdp)
+      const offerCollision =
+        sdp.type === 'offer' && (this.makingOffer || this.pc.signalingState !== 'stable')
+      this.ignoreOffer = !this.polite && offerCollision
+      if (this.ignoreOffer) {
+        return
+      }
+      if (offerCollision) {
+        try {
+          await this.pc.setLocalDescription({ type: 'rollback' })
+        } catch {
+          // 部分浏览器不支持 rollback，继续尝试 setRemoteDescription
+        }
+      }
+      await this.pc.setRemoteDescription(this.sanitizeRemoteSdp(sdp))
       if (sdp.type === 'offer') {
         const answer = await this.pc.createAnswer()
         await this.pc.setLocalDescription(answer)
-        this.onSDP(answer)
+        this.emitLocalDescription()
       }
     } catch (e) {
       console.error(e)
       this.onError(e instanceof Error ? e : new Error('Error setting remote SDP'))
-      this.dispose()
+      this.teardown()
     }
   }
 
@@ -217,7 +427,28 @@ export class PeerDataChannel {
    * @param candidate ICE candidate
    */
   public async addICECandidate(candidate: RTCIceCandidateInit): Promise<void> {
+    if (!this.allowTcp && isTcpCandidate(candidate.candidate)) {
+      return
+    }
     await this.pc.addIceCandidate(candidate)
+  }
+
+  private sanitizeRemoteSdp(sdp: RTCSessionDescriptionInit): RTCSessionDescriptionInit {
+    if (this.allowTcp || !sdp.sdp) {
+      return sdp
+    }
+    return { ...sdp, sdp: stripTcpCandidates(sdp.sdp) }
+  }
+
+  private emitLocalDescription(): void {
+    const desc = this.pc.localDescription
+    if (!desc) {
+      return
+    }
+    this.onSDP({
+      type: desc.type,
+      sdp: this.allowTcp ? desc.sdp : stripTcpCandidates(desc.sdp)
+    })
   }
 
   /**
@@ -236,20 +467,76 @@ export class PeerDataChannel {
   }
 
   /**
+   * 仅允许中继升到公网直连 / 局域网，而且只升一次。
+   * 已经是局域网或公网直连时不再 restartIce，避免把稳定连接打断。
+   */
+  public async tryPromoteDirect(): Promise<boolean> {
+    if (
+      this.disposed ||
+      !this.isInitiator ||
+      this.pathLocked ||
+      this.promotingDirect ||
+      this.dc?.readyState !== 'open'
+    ) {
+      return false
+    }
+    const { selected, best } = await inspectWebRTCLink(this.pc)
+    if (selected === 'lan' || selected === 'wan') {
+      this.pathLocked = true
+      return false
+    }
+    if (this.promoteAttempts >= 1) {
+      return false
+    }
+    if (best !== 'lan' && best !== 'wan') {
+      return false
+    }
+    if (LINK_RANK[best] <= LINK_RANK[selected] || LINK_RANK[best] <= this.promotedRank) {
+      return false
+    }
+    this.promotedRank = LINK_RANK[best]
+    this.promoteAttempts += 1
+    this.promotingDirect = true
+    try {
+      this.pc.restartIce()
+      return true
+    } catch (error) {
+      console.warn(error)
+      this.promotingDirect = false
+      this.promotedRank = LINK_RANK[selected]
+      return false
+    }
+  }
+
+  /**
    * 获取接收缓存的大小
    * @returns 接收缓存的大小
    */
   public getReceivedBufferSize(): number {
-    return this.receiveData.chunks.reduce(
-      (size, dat) => size + (typeof dat === 'string' ? dat.length : dat.byteLength),
-      0
-    )
+    return this.receiveData.chunks.reduce((size, dat) => {
+      if (typeof dat === 'string') {
+        return size + dat.length
+      }
+      return size + dat.byteLength
+    }, 0)
+  }
+
+  /**
+   * 尚未真正送出通道的字节。发送进度应用「已排队 - bufferedAmount」。
+   */
+  public getBufferedAmount(): number {
+    return this.dc?.bufferedAmount ?? 0
   }
 
   /**
    * 关闭对等连接并清理资源
    */
   public dispose(): void {
+    if (this.disposed) {
+      return
+    }
+    this.disposed = true
+    this.clearUpgradeTimers()
     if (this.sendPromiseReject) {
       this.sendPromiseReject()
       this.sendPromiseReject = null
@@ -267,24 +554,15 @@ export class PeerDataChannel {
     this.pc.onsignalingstatechange = null
     this.pc.onicegatheringstatechange = null
     this.pc.onnegotiationneeded = null
+    this.pc.onconnectionstatechange = null
     this.pc.close()
   }
-}
 
-export class EventQueue<T> {
-  private tail: Promise<void> = Promise.resolve()
-  private handler: (e: T) => Promise<void>
-
-  constructor(handler: (e: T) => Promise<void>) {
-    this.handler = handler
-  }
-
-  public enqueue(e: T): void {
-    // 每次把新任务链到上一个任务后面
-    this.tail = this.tail
-      .then(() => this.handler(e))
-      .catch((error) => {
-        console.error('Error processing event:', error)
-      })
+  private teardown(): void {
+    if (this.disposed) {
+      return
+    }
+    this.dispose()
+    this.onDispose()
   }
 }

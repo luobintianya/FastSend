@@ -1,7 +1,7 @@
 export default {
     root: ({ props }) => ({
         class: [
-            'fixed z-[9999] p-4 w-96 rounded-md',
+            'fixed z-[9999] p-4 w-96 rounded-md pointer-events-none',
             {
                 'top-0 right-0': props.position == 'top-right',
                 'top-0 left-0': props.position == 'top-left',
@@ -14,7 +14,7 @@ export default {
     }),
     message: ({ props }) => ({
         class: [
-            'mb-4 rounded-md w-full',
+            'mb-4 rounded-md w-full pointer-events-auto',
             'border border-transparent',
             'backdrop-blur-[10px] shadow-md',
 

@@ -31,6 +31,20 @@ function switchConfirmDefault() {
   userStore.setConfirmDefault(isConfirmDefault.value)
 }
 
+const notifyEnabled = ref(false)
+
+async function switchNotify() {
+  if (notifyEnabled.value) {
+    const ok = await requestNotifyPermission()
+    notifyEnabled.value = ok
+    if (ok) {
+      localStorage.removeItem('fastsendNotifyMuted')
+    }
+    return
+  }
+  localStorage.setItem('fastsendNotifyMuted', '1')
+}
+
 // 展示昵称编辑弹框
 function showNicknameEditor(event: Event) {
   tmpNickname.value = userInfo.value.nickname
@@ -61,12 +75,16 @@ onMounted(() => {
   })
   userStore.initializeFromStorage()
   tmpNickname.value = userInfo.value.nickname
+  notifyEnabled.value =
+    typeof Notification !== 'undefined' &&
+    Notification.permission === 'granted' &&
+    localStorage.getItem('fastsendNotifyMuted') !== '1'
 })
 </script>
 
 <template>
   <nav
-    class="flex flex-row items-center py-3 px-4 md:py-4 md:px-[10vw] sticky left-0 right-0 top-0 z-50 nav-bar"
+    class="flex flex-row items-center py-3 px-4 md:py-4 md:px-[10vw] sticky left-0 right-0 top-0 z-[60] nav-bar"
     :class="{ 'backdrop-blur': isBgBlur }"
   >
     <NuxtLink :to="localePath('/')">
@@ -132,6 +150,10 @@ onMounted(() => {
         <div class="flex flex-row items-center justify-between">
           <p class="text-sm">{{ $t('label.autoConfirmBySender') }}</p>
           <ToggleSwitch v-model="isConfirmDefault" @change="switchConfirmDefault" />
+        </div>
+        <div class="flex flex-row items-center justify-between mt-3">
+          <p class="text-sm">{{ $t('label.browserNotify') }}</p>
+          <ToggleSwitch v-model="notifyEnabled" @change="switchNotify" />
         </div>
       </div>
     </Popover>

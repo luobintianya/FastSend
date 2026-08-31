@@ -242,7 +242,7 @@ export function toMetaFileMap(fileMap: FlatFileMap): FlatFileMap {
   return result
 }
 
-export type LinkType = 'lan' | 'wan' | 'unknown'
+export type LinkType = 'lan' | 'wan' | 'relay' | 'relayTcp' | 'unknown'
 
 export interface RoomMember {
   id: string
@@ -263,6 +263,8 @@ export interface ChatMessage {
   isPrivate?: boolean
   toId?: string
   toNickname?: string
+  /** 图片消息，base64 data URL */
+  image?: string
 }
 
 export interface FileOffer {

@@ -6,11 +6,13 @@ const loaderElm = ref()
 watch(isFullScreenLoading, (isLoad) => {
   if (isLoad) {
     loaderElm.value.style.display = 'flex'
+    loaderElm.value.style.pointerEvents = 'auto'
     setTimeout(() => {
       loaderElm.value.style.opacity = '1'
     }, 1)
   } else {
     loaderElm.value.style.opacity = '0'
+    loaderElm.value.style.pointerEvents = 'none'
     setTimeout(() => {
       loaderElm.value.style.display = 'none'
     }, 500)

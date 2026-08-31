@@ -61,6 +61,22 @@ export default defineNuxtConfig({
       unstyled: true,
       ripple: true
     },
+    components: {
+      include: [
+        'Button',
+        'ProgressBar',
+        'Toast',
+        'Avatar',
+        'InputText',
+        'Dialog',
+        'Tree',
+        'ScrollTop',
+        'InputGroup',
+        'Popover',
+        'Divider',
+        'ToggleSwitch'
+      ]
+    },
     importPT: { from: path.resolve(__dirname, './presets/aura/') } // Import and apply preset
     // For Windows
     // importPT: { as: 'Aura', from: '~/presets/aura' }
@@ -81,6 +97,9 @@ export default defineNuxtConfig({
     srcDir: '../public',
     filename: 'sw.js',
     registerType: 'prompt',
+    injectManifest: {
+      globPatterns: ['favicon.webp']
+    },
 
     // workbox: {
     //   runtimeCaching: [
@@ -123,6 +142,35 @@ export default defineNuxtConfig({
     // 避免外置 node_modules 中传递依赖缺失（Node 24+ ESM 严格解析）
     externals: {
       inline: [/.*/]
+    }
+  },
+
+  runtimeConfig: {
+    turnSecret: ''
+  },
+
+  hooks: {
+    'vite:extendConfig'(config, { isClient }) {
+      if (!isClient) {
+        return
+      }
+      config.build ||= {}
+      config.build.modulePreload = false
+      config.build.rollupOptions ||= {}
+      const output = config.build.rollupOptions.output
+      const apply = (item: { inlineDynamicImports?: boolean; manualChunks?: unknown }) => {
+        item.inlineDynamicImports = true
+        item.manualChunks = undefined
+      }
+      if (Array.isArray(output)) {
+        output.forEach(apply)
+      } else if (output) {
+        apply(output)
+      } else {
+        config.build.rollupOptions.output = {
+          inlineDynamicImports: true
+        }
+      }
     }
   },
 

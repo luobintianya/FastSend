@@ -1,6 +1,8 @@
 import CryptoJS from 'crypto-js'
 import { toCanvas } from 'qrcode'
 import { PeerDataChannel } from '~/utils/PeerDataChannel'
+import { createSpeedTracker } from '~/utils/index'
+import { getIceServers } from '~/utils/iceServers'
 import {
   createSenderCurrentFileState,
   createSenderStatusState,
@@ -27,6 +29,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
   const peerUserInfo = ref<UserInfo>({ nickname: 'unknown', avatarURL: '' })
   const code = ref('')
   const totalTransmittedBytes = ref(0)
+  const displayBytes = ref(0)
   const startTime = ref(0)
   const totalSpeed = ref(0)
   const durationTimeStr = ref('0:00:00')
@@ -34,6 +37,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
   const status = ref<SenderStatusState>(createSenderStatusState())
 
   let calcSpeedJobId: ReturnType<typeof setInterval> | undefined
+  const speedTracker = createSpeedTracker()
   let ws: WebSocket | null = null
   let pdc: PeerDataChannel | null = null
   const hasher = CryptoJS.algo.MD5.create()
@@ -52,6 +56,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     peerUserInfo.value = { nickname: 'unknown', avatarURL: '' }
     code.value = ''
     totalTransmittedBytes.value = 0
+    displayBytes.value = 0
     startTime.value = 0
     totalSpeed.value = 0
     durationTimeStr.value = '0:00:00'
@@ -75,9 +80,12 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     if (!startTime.value) {
       return
     }
-    totalSpeed.value =
-      totalTransmittedBytes.value / ((new Date().getTime() - startTime.value) / 1e3)
-    durationTimeStr.value = formatTime(new Date().getTime() - startTime.value)
+    const queued = totalTransmittedBytes.value
+    const bytes = Math.max(0, queued - (pdc?.getBufferedAmount() ?? 0))
+    displayBytes.value = bytes
+    const elapsedSec = Math.max((Date.now() - startTime.value) / 1e3, 0.2)
+    totalSpeed.value = speedTracker.update(bytes, elapsedSec)
+    durationTimeStr.value = formatTime(Date.now() - startTime.value)
   }
 
   async function confirmUser(isTrust: boolean) {
@@ -150,18 +158,25 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
         }
 
         hasher.update(CryptoJS.lib.WordArray.create(ab))
-        await pdc?.sendData(ab)
-
-        curFile.value.lastBytes = curFile.value.transmittedBytes
-        curFile.value.transmittedBytes += ab.byteLength
-        totalTransmittedBytes.value += ab.byteLength
+        const queuedBefore = totalTransmittedBytes.value
+        const fileBefore = curFile.value.transmittedBytes
+        await pdc?.sendData(ab, (sent) => {
+          totalTransmittedBytes.value = queuedBefore + sent
+          curFile.value.transmittedBytes = fileBefore + sent
+        })
+        totalTransmittedBytes.value = queuedBefore + ab.byteLength
+        curFile.value.transmittedBytes = fileBefore + ab.byteLength
 
         const nowTime = new Date().getTime()
         const elapsed = nowTime - curFile.value.startTime
-        // 防止时间差为零导致除零异常
+        const sentNow = Math.max(
+          0,
+          curFile.value.transmittedBytes - (pdc?.getBufferedAmount() ?? 0)
+        )
         if (elapsed > 0) {
-          curFile.value.speed = (curFile.value.speed + ab.byteLength / (elapsed / 1e3)) / 2
+          curFile.value.speed = (curFile.value.speed + sentNow / (elapsed / 1e3)) / 2
         }
+        curFile.value.lastBytes = sentNow
         curFile.value.startTime = nowTime
       }
 
@@ -204,8 +219,8 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     }
   }
 
-  function initPDC() {
-    pdc = new PeerDataChannel({ iceServers: pubIceServers })
+  async function initPDC() {
+    pdc = new PeerDataChannel({ iceServers: await getIceServers() })
     pdc.onSDP = (sdp) => ws?.send(JSON.stringify({ type: 'sdp', data: sdp }))
     pdc.onICECandidate = (candidate) =>
       ws?.send(JSON.stringify({ type: 'candidate', data: candidate }))
@@ -280,14 +295,15 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     ws.onopen = () => {
       status.value.isConnectServer = true
       startTime.value = Date.now()
-      calcSpeedJobId = setInterval(calcSpeedFn, 1e3)
+      speedTracker.reset()
+      calcSpeedJobId = setInterval(calcSpeedFn, 200)
       ws?.send(JSON.stringify({ type: 'send' }))
     }
     ws.onmessage = async (event) => {
       const data = JSON.parse(event.data)
       if (data.type === 'code') {
         code.value = data.code
-        initPDC()
+        await initPDC()
         status.value.isIniting = false
         return
       }
@@ -336,6 +352,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     peerUserInfo,
     code,
     totalTransmittedBytes,
+    displayBytes,
     startTime,
     totalSpeed,
     durationTimeStr,

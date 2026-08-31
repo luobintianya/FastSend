@@ -214,10 +214,6 @@ function joinRoom(peer: any, rawCode: unknown, user: unknown, clientId: unknown)
       id: peer.id,
       user: peer.user
     })
-    sendJson(other, {
-      type: 'roomMembers',
-      members: snapshotMembers(room, other.id)
-    })
   }
 
   heartbeat(peer)
@@ -248,7 +244,8 @@ function handleRoomMessage(peer: any, data: any) {
     const text = String(data.data?.text || '')
       .trim()
       .slice(0, 2000)
-    if (!text) {
+    const image = typeof data.data?.image === 'string' ? data.data.image.slice(0, 3e6) : ''
+    if (!text && !image) {
       return
     }
     const to = String(data.to || '')
@@ -258,7 +255,7 @@ function handleRoomMessage(peer: any, data: any) {
       to: to || undefined,
       private: !!to,
       user: peer.user || { nickname: 'unknown', avatarURL: '' },
-      data: { text }
+      data: { text, ...(image ? { image } : {}) }
     }
     if (to) {
       const target = room.members.get(to)

@@ -153,12 +153,62 @@ export function selectAvatar(cb: (url: string) => void) {
  * @return 格式化后的字符串
  */
 export function humanFileSize(bytes: number, decimals = 2): string {
-  if (!bytes) return '0B'
-  var k = 1024
-  var dm = decimals || 2
-  var sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
-  var i = Math.floor(Math.log(bytes) / Math.log(k))
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + (sizes[i] ?? '')
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0B'
+  const k = 1024
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB']
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1)
+  const value = bytes / Math.pow(k, i)
+  if (i === 0) {
+    return `${Math.round(value)}B`
+  }
+  return `${value.toFixed(decimals)}${sizes[i]}`
+}
+
+/**
+ * 用滑动窗口 + EMA 估算速率。TURN/弱网下字节会一截截到达，
+ * 若只看最近一两秒，界面会在高峰和 0B/s 之间跳。
+ */
+export function createSpeedTracker(windowMs = 5000) {
+  let samples: Array<{ t: number; bytes: number }> = []
+  let smoothed = 0
+
+  return {
+    reset() {
+      samples = []
+      smoothed = 0
+    },
+    update(bytes: number, lifetimeElapsedSec: number): number {
+      const now = Date.now()
+      const safeBytes = Math.max(0, bytes)
+      samples.push({ t: now, bytes: safeBytes })
+      const cutoff = now - windowMs
+      samples = samples.filter((item) => item.t >= cutoff)
+
+      const first = samples[0]
+      const last = samples[samples.length - 1]
+      const lifetime = safeBytes / Math.max(lifetimeElapsedSec, 0.5)
+
+      let instant = lifetime
+      if (first && last) {
+        const dt = (last.t - first.t) / 1000
+        if (dt >= 1) {
+          instant = Math.max(0, (last.bytes - first.bytes) / dt)
+        }
+      }
+
+      // 窗口几乎停住时用全程均值托底，避免突然变成 0B/s
+      if (instant < lifetime * 0.2) {
+        instant = instant * 0.3 + lifetime * 0.7
+      }
+
+      if (smoothed <= 0) {
+        smoothed = instant
+      } else {
+        smoothed = smoothed * 0.82 + instant * 0.18
+      }
+      return smoothed
+    }
+  }
 }
 
 export function doDownloadFromHref(href: string, filename: string) {
@@ -297,6 +347,9 @@ export async function calcMD5(file: File | Blob) {
  * @returns
  */
 export function formatTime(milliseconds: number) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) {
+    return '--:--'
+  }
   // 计算小时数
   const hours = Math.floor(milliseconds / (1000 * 60 * 60))
   // 计算剩余的分钟数
@@ -311,4 +364,21 @@ export function formatTime(milliseconds: number) {
   return hours === 0
     ? `${formattedMinutes}:${formattedSeconds}`
     : `${hours}:${formattedMinutes}:${formattedSeconds}`
+}
+
+/**
+ * 按当前速度估算剩余时间。速度过低或尚未开始传输时不给出离谱数字。
+ */
+export function formatRemainingTime(remainingBytes: number, bytesPerSec: number) {
+  if (!Number.isFinite(remainingBytes) || remainingBytes <= 0) {
+    return '00:00'
+  }
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec < 256) {
+    return '--:--'
+  }
+  const ms = (remainingBytes / bytesPerSec) * 1e3
+  if (ms > 10 * 3600 * 1000) {
+    return '--:--'
+  }
+  return formatTime(ms)
 }

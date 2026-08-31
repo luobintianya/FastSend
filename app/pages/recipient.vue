@@ -10,6 +10,7 @@ const {
   selectedKeys,
   totalFileSize,
   totalTransmittedBytes,
+  displayBytes,
   totalSpeed,
   durationTimeStr,
   remainingTimeStr,
@@ -230,14 +231,14 @@ onUnmounted(() => {
           <p class="text-sm mt-4">{{ t('label.totalProgress') }}</p>
           <ProgressBar
             :value="
-              Math.round(totalFileSize === 0 ? 0 : (totalTransmittedBytes / totalFileSize) * 100)
+              Math.round(totalFileSize === 0 ? 0 : (displayBytes / totalFileSize) * 100)
             "
           />
           <div class="flex flex-row items-center text-sm">
             <span>{{ durationTimeStr }} / {{ remainingTimeStr }}</span>
             <div class="flex-1"></div>
             <span>{{ formatSize(totalSpeed) }}/s</span
-            ><span class="ml-4">{{ formatSize(totalTransmittedBytes) }}</span
+            ><span class="ml-4">{{ formatSize(displayBytes) }}</span
             ><span class="mx-1">/</span><span>{{ formatSize(totalFileSize) }}</span>
           </div>
         </div>

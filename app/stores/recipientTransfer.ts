@@ -10,6 +10,8 @@ import {
   type UserInfo
 } from '~/types/transfer'
 import { PeerDataChannel } from '~/utils/PeerDataChannel'
+import { formatRemainingTime, createSpeedTracker } from '~/utils/index'
+import { getIceServers } from '~/utils/iceServers'
 
 /**
  * 接收端业务仓库。
@@ -34,6 +36,7 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
   const receiveFileIndex = ref(0)
   const totalFileSize = ref(0)
   const totalTransmittedBytes = ref(0)
+  const displayBytes = ref(0)
   const startTime = ref(0)
   const totalSpeed = ref(0)
   const durationTimeStr = ref('00:00')
@@ -45,6 +48,8 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
   const hasher = CryptoJS.algo.MD5.create()
 
   let calcSpeedJobId: ReturnType<typeof setInterval> | undefined
+  const speedTracker = createSpeedTracker()
+  let lastSpeedAt = 0
   let ws: WebSocket | null = null
   let pdc: PeerDataChannel | null = null
   let saveFileFH: FileSystemFileHandle | undefined
@@ -68,6 +73,7 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
     receiveFileIndex.value = 0
     totalFileSize.value = 0
     totalTransmittedBytes.value = 0
+    displayBytes.value = 0
     startTime.value = 0
     totalSpeed.value = 0
     durationTimeStr.value = '00:00'
@@ -99,14 +105,25 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
   }
 
   function calcSpeedFn() {
-    const curBytes = curFile.value.transmittedBytes + (pdc?.getReceivedBufferSize() || 0)
-    curFile.value.speed = curBytes - curFile.value.lastSize
+    const extra = pdc?.getReceivedBufferSize() || 0
+    const curBytes = curFile.value.transmittedBytes + extra
+    const now = Date.now()
+    const dt = Math.max((now - (lastSpeedAt || now)) / 1e3, 0.15)
+    curFile.value.speed = Math.max(0, (curBytes - curFile.value.lastSize) / dt)
     curFile.value.lastSize = curBytes
-    totalSpeed.value =
-      totalTransmittedBytes.value / ((new Date().getTime() - startTime.value) / 1e3)
-    durationTimeStr.value = formatTime(new Date().getTime() - startTime.value)
-    remainingTimeStr.value = formatTime(
-      ((totalFileSize.value - totalTransmittedBytes.value) / Math.max(totalSpeed.value, 1)) * 1e3
+    lastSpeedAt = now
+    const total = totalFileSize.value
+    let transmitted = totalTransmittedBytes.value + extra
+    if (total > 0) {
+      transmitted = Math.min(transmitted, total)
+    }
+    displayBytes.value = transmitted
+    const elapsedSec = Math.max((now - startTime.value) / 1e3, 0.001)
+    totalSpeed.value = speedTracker.update(transmitted, elapsedSec)
+    durationTimeStr.value = formatTime(now - startTime.value)
+    remainingTimeStr.value = formatRemainingTime(
+      Math.max(total - transmitted, 0),
+      totalSpeed.value
     )
   }
 
@@ -245,9 +262,9 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
     }
   }
 
-  function initPDC() {
+  async function initPDC() {
     status.value.isPeerConnecting = true
-    pdc = new PeerDataChannel({ iceServers: pubIceServers, initializeDataChannel: true })
+    pdc = new PeerDataChannel({ iceServers: await getIceServers(), initializeDataChannel: true })
     pdc.onSDP = (sdp) => ws?.send(JSON.stringify({ type: 'sdp', data: sdp }))
     pdc.onICECandidate = (candidate) =>
       ws?.send(JSON.stringify({ type: 'candidate', data: candidate }))
@@ -498,13 +515,17 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
           curFileWriter = await saveFileFH?.createWritable()
         }
         startTime.value = Date.now()
-        calcSpeedJobId = setInterval(calcSpeedFn, 1e3)
+        lastSpeedAt = startTime.value
+        speedTracker.reset()
+        calcSpeedJobId = setInterval(calcSpeedFn, 200)
         receiveFileIndex.value = 1
         await requestFile(curFile.value.name)
       } else if (peerFilesInfo.value.type === 'transDir') {
         rootDirDH = await window.showDirectoryPicker()
         startTime.value = Date.now()
-        calcSpeedJobId = setInterval(calcSpeedFn, 1e3)
+        lastSpeedAt = startTime.value
+        speedTracker.reset()
+        calcSpeedJobId = setInterval(calcSpeedFn, 200)
         for (const key of waitReceiveFileList.value) {
           const paths = key.split('/')
           initCurFile(key)
@@ -523,7 +544,9 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
         }
       } else if (peerFilesInfo.value.type === 'syncDir') {
         startTime.value = Date.now()
-        calcSpeedJobId = setInterval(calcSpeedFn, 1e3)
+        lastSpeedAt = startTime.value
+        speedTracker.reset()
+        calcSpeedJobId = setInterval(calcSpeedFn, 200)
         for (const key of [
           ...syncDirStatus.value.waitAddList,
           ...syncDirStatus.value.waitUpdateList
@@ -613,7 +636,7 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
           status.value.error.msg = '404'
           dispose()
         } else if (data.code === 0) {
-          initPDC()
+          await initPDC()
         }
         return
       }
@@ -657,6 +680,7 @@ export const useRecipientTransferStore = defineStore('recipientTransfer', () => 
     receiveFileIndex,
     totalFileSize,
     totalTransmittedBytes,
+    displayBytes,
     startTime,
     totalSpeed,
     durationTimeStr,

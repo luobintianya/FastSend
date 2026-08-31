@@ -2,7 +2,11 @@ import CryptoJS from 'crypto-js'
 import { toCanvas } from 'qrcode'
 import { watch } from 'vue'
 import { PeerDataChannel } from '~/utils/PeerDataChannel'
-import { detectWebRTCLinkType } from '~/utils/webrtcLink'
+import { detectWebRTCLinkType, preferLinkType } from '~/utils/webrtcLink'
+import { showAppNotification } from '~/utils/notify'
+import { getClientId, formatRemainingTime, createSpeedTracker } from '~/utils/index'
+import { getIceServers } from '~/utils/iceServers'
+import { pubIceServers } from '~/utils/publicStunList'
 import {
   createRoomCurrentFileState,
   createRoomStatusState,
@@ -11,6 +15,7 @@ import {
   type FileOffer,
   type FilesPayload,
   type FlatFileMap,
+  type LinkType,
   type RoomCurrentFileState,
   type RoomMember,
   type RoomStatusState,
@@ -21,8 +26,11 @@ import {
 interface PeerLink {
   pdc: PeerDataChannel
   sendChain: Promise<void>
+  signalChain: Promise<void>
   remoteDescSet: boolean
   pendingCandidates: RTCIceCandidateInit[]
+  retryTimer?: ReturnType<typeof setTimeout>
+  linkPoll?: ReturnType<typeof setInterval>
 }
 
 function createRoomMember(id: string, user?: UserInfo): RoomMember {
@@ -50,12 +58,14 @@ export const useRoomStore = defineStore('room', () => {
   const status = ref<RoomStatusState>(createRoomStatusState())
   const chatMessages = ref<ChatMessage[]>([])
   const chatDraft = ref('')
+  const chatImageDraft = ref('')
   const chatTargetId = ref('')
   const incomingOffer = ref<FileOffer | null>(null)
   const transferPhase = ref<RoomTransferPhase>('idle')
   const curFile = ref<RoomCurrentFileState>(createRoomCurrentFileState())
   const totalFileSize = ref(0)
   const totalTransmittedBytes = ref(0)
+  const displayBytes = ref(0)
   const totalSpeed = ref(0)
   const durationTimeStr = ref('00:00')
   const remainingTimeStr = ref('00:00')
@@ -65,10 +75,17 @@ export const useRoomStore = defineStore('room', () => {
 
   const hasher = CryptoJS.algo.MD5.create()
   const peerLinks = new Map<string, PeerLink>()
+  /** 0=STUN 直连，1=TURN UDP，2=TURN TCP */
+  const iceTier = new Map<string, number>()
+  const remoteLinkType = new Map<string, LinkType>()
+  let iceTurn: RTCIceServer[] = pubIceServers
+  let iceTcp: RTCIceServer[] = pubIceServers
 
   let ws: WebSocket | null = null
   let calcSpeedJobId: ReturnType<typeof setInterval> | undefined
   let startTime = 0
+  let lastSpeedAt = 0
+  const speedTracker = createSpeedTracker()
   let outgoingFileMap: FlatFileMap = {}
   let incomingPayload: FilesPayload = { type: '', fileMap: {}, root: '' }
   let currentOfferId = ''
@@ -108,7 +125,7 @@ export const useRoomStore = defineStore('room', () => {
   const isBusy = computed(() => transferPhase.value !== 'idle')
   const hasConnectedPeer = computed(() => members.value.some((item) => item.isConnected))
   const canSendChat = computed(
-    () => members.value.length > 0 && status.value.isConnectServer && !isBusy.value
+    () => members.value.length > 0 && status.value.isConnectServer
   )
   const chatTargetName = computed(() => {
     if (!chatTargetId.value) {
@@ -158,7 +175,7 @@ export const useRoomStore = defineStore('room', () => {
     sendTo(peerId, JSON.stringify(payload)).catch(() => {})
   }
 
-  async function waitForDataChannel(peerId: string, timeout = 12e3) {
+  async function waitForDataChannel(peerId: string, timeout = 45e3) {
     const start = Date.now()
     while (Date.now() - start < timeout) {
       const link = peerLinks.get(peerId)
@@ -186,10 +203,13 @@ export const useRoomStore = defineStore('room', () => {
     curFileWriter = undefined
     rootDirDH = undefined
     startTime = 0
+    lastSpeedAt = 0
+    speedTracker.reset()
     transferPhase.value = 'idle'
     curFile.value = createRoomCurrentFileState()
     totalFileSize.value = 0
     totalTransmittedBytes.value = 0
+    displayBytes.value = 0
     totalSpeed.value = 0
     durationTimeStr.value = '00:00'
     remainingTimeStr.value = '00:00'
@@ -197,8 +217,44 @@ export const useRoomStore = defineStore('room', () => {
 
   function disposeLink(peerId: string) {
     const link = peerLinks.get(peerId)
+    if (link?.retryTimer) {
+      clearTimeout(link.retryTimer)
+    }
+    if (link?.linkPoll) {
+      clearInterval(link.linkPoll)
+    }
+    remoteLinkType.delete(peerId)
     peerLinks.delete(peerId)
     link?.pdc.dispose()
+  }
+
+  function scheduleLinkRetry(peerId: string, delay = 1200) {
+    const current = peerLinks.get(peerId)
+    if (current?.retryTimer) {
+      clearTimeout(current.retryTimer)
+    }
+    const timer = setTimeout(() => {
+      if (intentionalClose || !hasJoined) {
+        return
+      }
+      if (!members.value.some((item) => item.id === peerId)) {
+        return
+      }
+      const existing = peerLinks.get(peerId)
+      if (existing?.pdc.isDataChannelOpen()) {
+        return
+      }
+      if (existing && transferPeerId === peerId && transferPhase.value !== 'idle') {
+        return
+      }
+      if (existing) {
+        disposeLink(peerId)
+      }
+      createLink(peerId, selfId.value > peerId)
+    }, delay)
+    if (current) {
+      current.retryTimer = timer
+    }
   }
 
   function disposeAllLinks() {
@@ -283,11 +339,14 @@ export const useRoomStore = defineStore('room', () => {
 
   function resetState() {
     dispose()
+    iceTier.clear()
+    remoteLinkType.clear()
     roomCode.value = ''
     selfId.value = ''
     members.value = []
     chatMessages.value = []
     chatDraft.value = ''
+    chatImageDraft.value = ''
     chatTargetId.value = ''
     status.value = createRoomStatusState()
   }
@@ -298,7 +357,11 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  function sendTo(peerId: string, data: ArrayBuffer | string) {
+  function sendTo(
+    peerId: string,
+    data: ArrayBuffer | string,
+    onProgress?: (sentBytes: number) => void
+  ) {
     const link = peerLinks.get(peerId)
     if (!link) {
       return Promise.reject(new Error('Data channel not initialized'))
@@ -308,14 +371,14 @@ export const useRoomStore = defineStore('room', () => {
       if (!current) {
         throw new Error('Data channel not initialized')
       }
-      await current.pdc.sendData(data)
+      await current.pdc.sendData(data, onProgress)
     })
     link.sendChain = next.catch(() => {})
     return next
   }
 
-  function sendDC(data: ArrayBuffer | string) {
-    return sendTo(transferPeerId, data)
+  function sendDC(data: ArrayBuffer | string, onProgress?: (sentBytes: number) => void) {
+    return sendTo(transferPeerId, data, onProgress)
   }
 
   async function broadcastJSON(payload: unknown) {
@@ -336,22 +399,44 @@ export const useRoomStore = defineStore('room', () => {
     curFileWriter = undefined
   }
 
+  function getDisplayBytes() {
+    const link = peerLinks.get(transferPeerId)
+    const queued = totalTransmittedBytes.value
+    if (transferPhase.value === 'sending') {
+      return Math.max(0, queued - (link?.pdc.getBufferedAmount() ?? 0))
+    }
+    if (transferPhase.value === 'receiving') {
+      return queued + (link?.pdc.getReceivedBufferSize() ?? 0)
+    }
+    return queued
+  }
+
   function calcSpeedFn() {
     if (!startTime) {
       return
     }
-    const extra =
-      transferPhase.value === 'receiving'
-        ? peerLinks.get(transferPeerId)?.pdc.getReceivedBufferSize() || 0
-        : 0
-    const curBytes = curFile.value.transmittedBytes + extra
-    curFile.value.speed = curBytes - curFile.value.lastBytes
+    const total = totalFileSize.value
+    let bytes = getDisplayBytes()
+    if (total > 0) {
+      bytes = Math.min(bytes, total)
+    }
+    displayBytes.value = bytes
+
+    const now = Date.now()
+    const link = peerLinks.get(transferPeerId)
+    const curBytes =
+      transferPhase.value === 'sending'
+        ? Math.max(0, curFile.value.transmittedBytes - (link?.pdc.getBufferedAmount() ?? 0))
+        : curFile.value.transmittedBytes + (link?.pdc.getReceivedBufferSize() ?? 0)
+    const dt = Math.max((now - lastSpeedAt) / 1e3, 0.15)
+    curFile.value.speed = Math.max(0, (curBytes - curFile.value.lastBytes) / dt)
     curFile.value.lastBytes = curBytes
-    totalSpeed.value = totalTransmittedBytes.value / Math.max((Date.now() - startTime) / 1e3, 0.001)
-    durationTimeStr.value = formatTime(Date.now() - startTime)
-    remainingTimeStr.value = formatTime(
-      ((totalFileSize.value - totalTransmittedBytes.value) / Math.max(totalSpeed.value, 1)) * 1e3
-    )
+    lastSpeedAt = now
+
+    const elapsedSec = Math.max((now - startTime) / 1e3, 0.001)
+    totalSpeed.value = speedTracker.update(bytes, elapsedSec)
+    durationTimeStr.value = formatTime(now - startTime)
+    remainingTimeStr.value = formatRemainingTime(Math.max(total - bytes, 0), totalSpeed.value)
   }
 
   function startSpeedJob() {
@@ -359,7 +444,11 @@ export const useRoomStore = defineStore('room', () => {
       clearInterval(calcSpeedJobId)
     }
     startTime = Date.now()
-    calcSpeedJobId = setInterval(calcSpeedFn, 1e3)
+    lastSpeedAt = startTime
+    speedTracker.reset()
+    displayBytes.value = 0
+    calcSpeedFn()
+    calcSpeedJobId = setInterval(calcSpeedFn, 200)
   }
 
   function pushChat(message: Omit<ChatMessage, 'id'>) {
@@ -372,25 +461,63 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  async function refreshLinkType(peerId: string) {
-    for (let i = 0; i < 8; i++) {
-      const link = peerLinks.get(peerId)
-      if (!link) {
-        return
-      }
-      const linkType = await detectWebRTCLinkType(link.pdc.getRTCPeerConnection())
-      if (linkType !== 'unknown') {
-        patchMember(peerId, { linkType })
-        return
-      }
-      await new Promise((resolve) => setTimeout(resolve, 400))
+  function applyLinkType(peerId: string, detected?: LinkType) {
+    const current = members.value.find((item) => item.id === peerId)?.linkType || 'unknown'
+    if (current === 'lan' || current === 'wan') {
+      return current
     }
+    const reported = remoteLinkType.get(peerId) || 'unknown'
+    const resolved = preferLinkType(detected || 'unknown', reported)
+    if (resolved === 'unknown' || resolved === current) {
+      return resolved
+    }
+    patchMember(peerId, { linkType: resolved })
+    return resolved
+  }
+
+  async function refreshLinkType(peerId: string, announce = true) {
+    const link = peerLinks.get(peerId)
+    if (!link) {
+      return
+    }
+    const member = members.value.find((item) => item.id === peerId)
+    const prev = member?.linkType || 'unknown'
+    if (prev !== 'lan' && prev !== 'wan' && transferPhase.value === 'idle') {
+      await link.pdc.tryPromoteDirect()
+    }
+    const detected = await detectWebRTCLinkType(link.pdc.getRTCPeerConnection())
+    const next = applyLinkType(peerId, detected)
+    if (next === 'lan' || next === 'wan') {
+      if (link.linkPoll) {
+        clearInterval(link.linkPoll)
+        link.linkPoll = undefined
+      }
+    }
+    if (!announce || next === 'unknown' || next === prev) {
+      return
+    }
+    sendTo(peerId, JSON.stringify({ type: 'linkType', data: next })).catch(() => {})
+  }
+
+  function startLinkTypePoll(peerId: string) {
+    const link = peerLinks.get(peerId)
+    if (!link) {
+      return
+    }
+    if (link.linkPoll) {
+      return
+    }
+    refreshLinkType(peerId).catch(console.warn)
+    link.linkPoll = setInterval(() => {
+      refreshLinkType(peerId).catch(console.warn)
+    }, 2000)
   }
 
   function handlePeerLeft(peerId: string, user?: UserInfo) {
     const leaving = members.value.find((item) => item.id === peerId)
     const name = leaving?.user.nickname || user?.nickname || t('label.online')
     disposeLink(peerId)
+    iceTier.delete(peerId)
     members.value = members.value.filter((item) => item.id !== peerId)
     if (chatTargetId.value === peerId) {
       chatTargetId.value = ''
@@ -449,15 +576,22 @@ export const useRoomStore = defineStore('room', () => {
 
     const sliceSize = 1024 * 1024
     const count = Math.ceil(file.size / sliceSize)
+    let queuedTotal = totalTransmittedBytes.value
     for (let index = 0; index < count; index++) {
       const ab = await file.slice(index * sliceSize, (index + 1) * sliceSize).arrayBuffer()
       if (ab.byteLength === 0) {
         continue
       }
       hasher.update(CryptoJS.lib.WordArray.create(ab))
-      await sendDC(ab)
-      curFile.value.transmittedBytes += ab.byteLength
-      totalTransmittedBytes.value += ab.byteLength
+      const queuedBefore = queuedTotal
+      const fileBefore = curFile.value.transmittedBytes
+      await sendDC(ab, (sent) => {
+        totalTransmittedBytes.value = queuedBefore + sent
+        curFile.value.transmittedBytes = fileBefore + sent
+      })
+      queuedTotal += ab.byteLength
+      totalTransmittedBytes.value = queuedTotal
+      curFile.value.transmittedBytes = fileBefore + ab.byteLength
     }
 
     await sendDC(
@@ -562,10 +696,20 @@ export const useRoomStore = defineStore('room', () => {
       return
     }
 
+    if (obj.type === 'linkType') {
+      const reported = obj.data as LinkType
+      if (reported === 'lan' || reported === 'wan' || reported === 'relay' || reported === 'relayTcp') {
+        remoteLinkType.set(peerId, reported)
+        applyLinkType(peerId)
+      }
+      return
+    }
+
     if (obj.type === 'chat') {
       receiveChat(peerId, String(obj.data?.text || ''), undefined, {
         isPrivate: !!obj.private || !!obj.to,
-        toId: obj.to
+        toId: obj.to,
+        image: obj.data?.image
       })
       return
     }
@@ -597,7 +741,29 @@ export const useRoomStore = defineStore('room', () => {
         return
       }
       incomingOffer.value = offer
-      if (userStore.isConfirmDefault && offer.payload?.type === 'transFile') {
+      const summary = summarizePayload(offer.payload)
+      const fromName = offer.from?.nickname || t('label.chat')
+      const isFolder = offer.payload?.type === 'transDir'
+      const notifyTitle = isFolder ? t('label.incomingFolder') : t('label.incomingFile')
+      const notifyBody = t(isFolder ? 'hint.notifyIncomingFolder' : 'hint.notifyIncomingFile', {
+        name: fromName,
+        file: summary.name
+      })
+      const autoAccept = userStore.isConfirmDefault && offer.payload?.type === 'transFile'
+      const mode = showAppNotification(notifyTitle, {
+        body: notifyBody,
+        tag: 'fastsend-file',
+        requireInteraction: !autoAccept
+      })
+      if (mode === 'in-app') {
+        toast.add({
+          severity: 'info',
+          summary: notifyTitle,
+          detail: notifyBody,
+          life: 5e3
+        })
+      }
+      if (autoAccept) {
         await acceptIncomingOffer({ skipPicker: true })
       }
       return
@@ -698,23 +864,36 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
+  function bumpIceTier(peerId: string) {
+    iceTier.set(peerId, 2)
+  }
+
   function createLink(peerId: string, initiator: boolean) {
-    if (peerLinks.has(peerId)) {
+    const existing = peerLinks.get(peerId)
+    if (existing?.pdc.isDataChannelOpen()) {
+      return
+    }
+    if (existing) {
       return
     }
 
+    const allowTcp = (iceTier.get(peerId) ?? 0) >= 2
     const pdc = new PeerDataChannel({
-      iceServers: pubIceServers,
-      initializeDataChannel: initiator
+      iceServers: allowTcp ? iceTcp : iceTurn,
+      tcpIceServers: allowTcp ? undefined : iceTcp,
+      initializeDataChannel: initiator,
+      polite: !initiator,
+      allowTcp
     })
     const link: PeerLink = {
       pdc,
       sendChain: Promise.resolve(),
+      signalChain: Promise.resolve(),
       remoteDescSet: false,
       pendingCandidates: []
     }
     peerLinks.set(peerId, link)
-    patchMember(peerId, { isConnecting: true })
+    patchMember(peerId, { isConnecting: true, isConnected: false, linkType: 'unknown' })
 
     pdc.onSDP = (sdp) =>
       sendSignal({ type: 'sdp', to: peerId, data: { type: sdp.type, sdp: sdp.sdp } })
@@ -730,10 +909,21 @@ export const useRoomStore = defineStore('room', () => {
         }
       })
     pdc.onDispose = () => {
-      if (peerLinks.get(peerId)?.pdc === pdc) {
+      const current = peerLinks.get(peerId)
+      const isCurrent = current?.pdc === pdc
+      const wasConnected = members.value.find((item) => item.id === peerId)?.isConnected
+      if (isCurrent) {
+        if (current.retryTimer) {
+          clearTimeout(current.retryTimer)
+        }
         peerLinks.delete(peerId)
       }
-      patchMember(peerId, { isConnected: false, isConnecting: false, linkType: 'unknown' })
+      const stillHere = members.value.some((item) => item.id === peerId)
+      patchMember(peerId, {
+        isConnected: false,
+        isConnecting: stillHere && !intentionalClose,
+        linkType: 'unknown'
+      })
       if (transferPeerId === peerId) {
         toast.add({
           severity: 'warn',
@@ -743,18 +933,29 @@ export const useRoomStore = defineStore('room', () => {
         })
         resetTransferRuntime()
       }
+      if (isCurrent && stillHere && !intentionalClose && hasJoined) {
+        if (!wasConnected) {
+          bumpIceTier(peerId)
+        }
+        scheduleLinkRetry(peerId)
+      }
     }
     pdc.onError = (err) => {
       console.error(err)
-      patchMember(peerId, { isConnected: false, isConnecting: false })
     }
     pdc.onConnected = () => {
-      refreshLinkType(peerId).catch(console.warn)
+      startLinkTypePoll(peerId)
     }
     pdc.onOpen = () => {
+      iceTier.delete(peerId)
+      const current = peerLinks.get(peerId)
+      if (current?.retryTimer) {
+        clearTimeout(current.retryTimer)
+        current.retryTimer = undefined
+      }
       patchMember(peerId, { isConnected: true, isConnecting: false })
       sendTo(peerId, JSON.stringify({ type: 'user', data: userStore.userInfo })).catch(console.warn)
-      refreshLinkType(peerId).catch(console.warn)
+      startLinkTypePoll(peerId)
     }
     pdc.onReceive = async (data) => {
       if (typeof data === 'string') {
@@ -765,37 +966,62 @@ export const useRoomStore = defineStore('room', () => {
         await handleBufferData(data)
       }
     }
+
+    link.retryTimer = setTimeout(() => {
+      if (peerLinks.get(peerId)?.pdc === pdc && !pdc.isDataChannelOpen()) {
+        bumpIceTier(peerId)
+        scheduleLinkRetry(peerId, 0)
+      }
+    }, 18e3)
   }
 
   async function applyRemoteSDP(from: string, sdp: RTCSessionDescriptionInit) {
     if (!peerLinks.has(from)) {
-      createLink(from, selfId.value > from)
+      createLink(from, sdp.type === 'offer' ? false : selfId.value > from)
     }
     const link = peerLinks.get(from)
     if (!link) {
       return
     }
-    await link.pdc.setRemoteSDP(sdp)
-    link.remoteDescSet = true
-    for (const candidate of link.pendingCandidates) {
-      await link.pdc.addICECandidate(candidate)
-    }
-    link.pendingCandidates = []
+    link.signalChain = link.signalChain
+      .then(async () => {
+        const current = peerLinks.get(from)
+        if (!current) {
+          return
+        }
+        await current.pdc.setRemoteSDP(sdp)
+        current.remoteDescSet = true
+        for (const candidate of current.pendingCandidates) {
+          await current.pdc.addICECandidate(candidate)
+        }
+        current.pendingCandidates = []
+      })
+      .catch(console.warn)
+    await link.signalChain
   }
 
   async function applyRemoteCandidate(from: string, candidate: RTCIceCandidateInit) {
     if (!peerLinks.has(from)) {
-      createLink(from, selfId.value > from)
+      createLink(from, false)
     }
     const link = peerLinks.get(from)
     if (!link) {
       return
     }
-    if (!link.remoteDescSet) {
-      link.pendingCandidates.push(candidate)
-      return
-    }
-    await link.pdc.addICECandidate(candidate)
+    link.signalChain = link.signalChain
+      .then(async () => {
+        const current = peerLinks.get(from)
+        if (!current) {
+          return
+        }
+        if (!current.remoteDescSet) {
+          current.pendingCandidates.push(candidate)
+          return
+        }
+        await current.pdc.addICECandidate(candidate)
+      })
+      .catch(console.warn)
+    await link.signalChain
   }
 
   function upsertMember(id: string, user: UserInfo | undefined, announce: boolean) {
@@ -808,8 +1034,11 @@ export const useRoomStore = defineStore('room', () => {
       if (user) {
         patchMember(id, { user })
       }
-      if (!peerLinks.has(id)) {
-        createLink(id, initiator)
+      const link = peerLinks.get(id)
+      if (!link || !link.pdc.isDataChannelOpen()) {
+        if (!link) {
+          createLink(id, initiator)
+        }
       }
       return
     }
@@ -854,12 +1083,6 @@ export const useRoomStore = defineStore('room', () => {
   }
 
   function handleRoomMembers(list: Array<{ id: string; user: UserInfo }>) {
-    const ids = new Set((list || []).map((item) => item.id))
-    for (const member of [...members.value]) {
-      if (!ids.has(member.id)) {
-        handlePeerLeft(member.id, member.user)
-      }
-    }
     for (const item of list || []) {
       upsertMember(item.id, item.user, false)
     }
@@ -1071,23 +1294,47 @@ export const useRoomStore = defineStore('room', () => {
     fromId: string,
     text: string,
     nickname?: string,
-    extra?: { isPrivate?: boolean; toId?: string }
+    extra?: { isPrivate?: boolean; toId?: string; image?: string }
   ) {
     const trimmed = text.trim().slice(0, 2000)
-    if (!trimmed || fromId === selfId.value) {
+    const image = typeof extra?.image === 'string' ? extra.image.slice(0, 3e6) : ''
+    if ((!trimmed && !image) || fromId === selfId.value) {
       return
     }
     const member = members.value.find((item) => item.id === fromId)
+    const fromName = nickname || member?.user.nickname || t('label.chat')
     pushChat({
       fromId,
-      fromNickname: nickname || member?.user.nickname || 'unknown',
+      fromNickname: fromName,
       text: trimmed,
+      image: image || undefined,
       ts: Date.now(),
       isSelf: false,
       isPrivate: extra?.isPrivate,
       toId: extra?.toId,
       toNickname: extra?.isPrivate ? userStore.userInfo.nickname : undefined
     })
+    const imageLabel = t('label.imageMessage')
+    const body =
+      !trimmed && image
+        ? `[${imageLabel}]`
+        : extra?.isPrivate
+          ? `[${t('label.privateMessage')}] ${trimmed}`
+          : trimmed
+    const mode = showAppNotification(fromName, {
+      body,
+      tag: `fastsend-chat-${fromId}`
+    })
+    if (mode === 'in-app') {
+      toast.add({
+        severity: 'info',
+        summary: extra?.isPrivate
+          ? `${fromName} · ${t('label.privateMessage')}`
+          : fromName,
+        detail: body,
+        life: 4e3
+      })
+    }
   }
 
   function setChatTarget(peerId: string) {
@@ -1096,7 +1343,8 @@ export const useRoomStore = defineStore('room', () => {
 
   async function sendChat() {
     const text = chatDraft.value.trim()
-    if (!text || !canSendChat.value) {
+    const image = chatImageDraft.value
+    if ((!text && !image) || !canSendChat.value) {
       return
     }
     const toId = chatTargetId.value
@@ -1105,11 +1353,16 @@ export const useRoomStore = defineStore('room', () => {
       chatTargetId.value = ''
     }
     chatDraft.value = ''
-    const payload = { text: text.slice(0, 2000) }
+    chatImageDraft.value = ''
+    const payload: { text: string; image?: string } = { text: text.slice(0, 2000) }
+    if (image) {
+      payload.image = image
+    }
     pushChat({
       fromId: selfId.value,
       fromNickname: userStore.userInfo.nickname,
       text: payload.text,
+      image: payload.image,
       ts: Date.now(),
       isSelf: true,
       isPrivate: !!toMember,
@@ -1203,7 +1456,8 @@ export const useRoomStore = defineStore('room', () => {
       if (data.type === 'chat') {
         receiveChat(data.from, String(data.data?.text || ''), data.user?.nickname, {
           isPrivate: !!data.private,
-          toId: data.to
+          toId: data.to,
+          image: data.data?.image
         })
         return
       }
@@ -1276,7 +1530,16 @@ export const useRoomStore = defineStore('room', () => {
       }
     )
     bindLifecycle()
-    connectSocket()
+    void Promise.all([getIceServers({ mode: 'turn' }), getIceServers({ mode: 'tcp' })])
+      .then(([turnServers, tcpServers]) => {
+        iceTurn = turnServers
+        iceTcp = tcpServers
+      })
+      .finally(() => {
+        if (!intentionalClose && roomCode.value === nextCode) {
+          connectSocket()
+        }
+      })
   }
 
   function cleanup() {
@@ -1290,6 +1553,7 @@ export const useRoomStore = defineStore('room', () => {
     status,
     chatMessages,
     chatDraft,
+    chatImageDraft,
     chatTargetId,
     chatTargetName,
     incomingOffer,
@@ -1298,6 +1562,7 @@ export const useRoomStore = defineStore('room', () => {
     curFile,
     totalFileSize,
     totalTransmittedBytes,
+    displayBytes,
     totalSpeed,
     durationTimeStr,
     remainingTimeStr,

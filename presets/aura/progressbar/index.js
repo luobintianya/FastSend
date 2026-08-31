@@ -32,7 +32,7 @@ export default {
 
             // Transitions
             {
-                'transition-width duration-1000 ease-in-out': props.mode !== 'indeterminate',
+                'transition-[width] duration-200 ease-out': props.mode !== 'indeterminate',
                 'progressbar-value-animate': props.mode == 'indeterminate'
             },
 
