@@ -252,6 +252,12 @@ const askNotify = () => {
   requestNotifyPermission().catch(() => {})
 }
 
+const dragOverPeerId = ref('')
+function onDragOverPeer(e: DragEvent) {
+  dragOverPeerId.value =
+    (e.target as HTMLElement | null)?.closest?.('[data-peer-id]')?.getAttribute('data-peer-id') || ''
+}
+
 onMounted(() => {
   userStore.initializeFromStorage()
   ensureRoom()
@@ -277,7 +283,12 @@ onMounted(() => {
   window.ondrop = (e) => {
     e.preventDefault()
     roomStore.setDragging(false)
+    const peerId = (e.target as HTMLElement | null)?.closest?.('[data-peer-id]')?.getAttribute(
+      'data-peer-id'
+    )
+    void roomStore.handleDropFile(e, peerId || undefined)
   }
+  window.addEventListener('dragover', onDragOverPeer)
 })
 
 onUnmounted(() => {
@@ -288,6 +299,7 @@ onUnmounted(() => {
   window.ondragleave = null
   window.ondragover = null
   window.ondrop = null
+  window.removeEventListener('dragover', onDragOverPeer)
 })
 </script>
 
@@ -299,10 +311,8 @@ onUnmounted(() => {
 
     <div
       ref="fileDragArea"
-      @dragover.prevent
-      @drop="roomStore.handleDropFile"
-      class="file-drag-area fixed inset-0 z-40 flex-col items-center justify-center bg-white/60 dark:bg-black/60 backdrop-blur-sm border border-dashed border-neutral-500"
-      :class="isFileDragging ? 'flex pointer-events-auto opacity-100' : 'hidden pointer-events-none'"
+      class="file-drag-area pointer-events-none fixed inset-0 z-40 flex-col items-center justify-center bg-white/60 dark:bg-black/60 border border-dashed border-neutral-500"
+      :class="isFileDragging ? 'flex opacity-100' : 'hidden'"
     >
       <Icon name="solar:file-send-linear" size="48" />
       <p class="mt-4">{{ $t('label.dragHereToSendFile') }}</p>
@@ -530,8 +540,14 @@ onUnmounted(() => {
             <div
               v-for="member in members"
               :key="member.id"
-              class="flex items-start gap-3 p-3 rounded-2xl shadow bg-white/80 dark:bg-zinc-900/80"
-              :class="chatTargetId === member.id ? 'ring-2 ring-amber-400' : ''"
+              :data-peer-id="member.id"
+              class="relative z-50 flex items-start gap-3 p-3 rounded-2xl shadow bg-white/80 dark:bg-zinc-900/80 transition"
+              :class="[
+                chatTargetId === member.id ? 'ring-2 ring-amber-400' : '',
+                isFileDragging && dragOverPeerId === member.id && member.isConnected
+                  ? 'ring-2 ring-emerald-500 scale-[1.02]'
+                  : ''
+              ]"
             >
               <div class="relative shrink-0">
                 <Avatar shape="circle" size="large" :image="member.user.avatarURL" class="shadow" />

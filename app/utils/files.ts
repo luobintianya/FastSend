@@ -160,3 +160,45 @@ export function fileMapWithoutRoot(fileMap: any) {
   }
   return res
 }
+
+/**
+ * 把拖进来的目录展开成扁平文件树，key 为 "目录名/子路径"。
+ */
+export async function dealFilesFromDroppedDir(entry: FileSystemEntry) {
+  const result: any = {}
+  const readAll = (reader: FileSystemDirectoryReader) =>
+    new Promise<FileSystemEntry[]>((resolve, reject) => {
+      const all: FileSystemEntry[] = []
+      const next = () =>
+        reader.readEntries((batch) => {
+          if (!batch.length) {
+            resolve(all)
+            return
+          }
+          all.push(...batch)
+          next()
+        }, reject)
+      next()
+    })
+  const walk = async (e: FileSystemEntry, parts: string[]) => {
+    if (e.isFile) {
+      const file = await new Promise<File>((resolve, reject) =>
+        (e as FileSystemFileEntry).file(resolve, reject)
+      )
+      const paths = [...parts, e.name]
+      result[paths.join('/')] = {
+        paths,
+        size: file.size,
+        lastModified: file.lastModified,
+        file
+      }
+      return
+    }
+    const children = await readAll((e as FileSystemDirectoryEntry).createReader())
+    for (const child of children) {
+      await walk(child, [...parts, e.name])
+    }
+  }
+  await walk(entry, [])
+  return result
+}

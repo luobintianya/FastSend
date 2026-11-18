@@ -10,6 +10,29 @@ type TurnPayload = {
 }
 
 let cache: { at: number; payload: TurnPayload } | null = null
+let inflight: Promise<TurnPayload> | null = null
+
+function loadPayload(): Promise<TurnPayload> {
+  if (cache && Date.now() - cache.at <= 60e3) {
+    return Promise.resolve(cache.payload)
+  }
+  // 并发调用共用同一个请求，避免 turn / tcp 两次重复拉取
+  inflight ??= $fetch<TurnPayload>('/api/turn', { timeout: 3000 })
+    .catch(() => ({}) as TurnPayload)
+    .then((payload) => {
+      cache = { at: Date.now(), payload: payload || {} }
+      return cache.payload
+    })
+    .finally(() => {
+      inflight = null
+    })
+  return inflight
+}
+
+/** 提前预取 TURN 凭证 */
+export function prefetchIceServers(): void {
+  void loadPayload()
+}
 
 function toServers(payload: TurnPayload, mode: IceMode): RTCIceServer[] {
   const servers: RTCIceServer[] = []
@@ -47,14 +70,7 @@ export async function getIceServers(opts?: {
   mode?: IceMode
   allowTcp?: boolean
 }): Promise<RTCIceServer[]> {
-  if (!cache || Date.now() - cache.at > 60e3) {
-    try {
-      const payload = await $fetch<TurnPayload>('/api/turn')
-      cache = { at: Date.now(), payload: payload || {} }
-    } catch {
-      cache = { at: Date.now(), payload: {} }
-    }
-  }
+  const payload = await loadPayload()
   const mode: IceMode = opts?.mode || (opts?.allowTcp ? 'tcp' : 'turn')
-  return toServers(cache.payload, mode)
+  return toServers(payload, mode)
 }

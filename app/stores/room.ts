@@ -972,7 +972,7 @@ export const useRoomStore = defineStore('room', () => {
         bumpIceTier(peerId)
         scheduleLinkRetry(peerId, 0)
       }
-    }, 18e3)
+    }, 10e3)
   }
 
   async function applyRemoteSDP(from: string, sdp: RTCSessionDescriptionInit) {
@@ -1167,37 +1167,50 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  async function handleDropFile(event: DragEvent) {
+  async function handleDropFile(event: DragEvent, targetPeerId?: string) {
     event.preventDefault()
     isFileDragging.value = false
+    const dt = event.dataTransfer
+    if (isBusy.value || !dt || dt.items.length === 0) {
+      return
+    }
     const connected = members.value.filter((item) => item.isConnected)
-    if (connected.length !== 1 || isBusy.value || !event.dataTransfer || event.dataTransfer.items.length === 0) {
-      if (connected.length > 1) {
-        toast.add({
-          severity: 'info',
-          summary: 'Info',
-          detail: t('hint.selectPeerToSend'),
-          life: 4e3
-        })
+    let peerId = targetPeerId
+    if (!peerId) {
+      if (connected.length === 1) {
+        peerId = connected[0]!.id
+      } else {
+        if (connected.length > 1) {
+          toast.add({
+            severity: 'info',
+            summary: 'Info',
+            detail: t('hint.selectPeerToSend'),
+            life: 4e3
+          })
+        }
+        return
       }
+    }
+    if (!connected.some((item) => item.id === peerId)) {
       return
     }
-    const firstItem = event.dataTransfer.items[0]
-    const item = firstItem?.webkitGetAsEntry()
-    const files = event.dataTransfer.files
-    if (!item || !files[0] || !connected[0]) {
+    const entry = dt.items[0]?.webkitGetAsEntry()
+    const file = dt.files[0]
+    if (!entry) {
       return
     }
-    if (item.isFile) {
-      await offerFiles('transFile', dealFilesFormFile(files[0]), connected[0].id)
+    if (entry.isFile && file) {
+      await offerFiles('transFile', dealFilesFormFile(file), peerId)
       return
     }
-    toast.add({
-      severity: 'warn',
-      summary: 'Warn',
-      detail: t('hint.noSupportFolderDrag'),
-      life: 4e3
-    })
+    if (entry.isDirectory) {
+      try {
+        const fileMap = await dealFilesFromDroppedDir(entry)
+        await offerFiles('transDir', fileMap, peerId)
+      } catch (error) {
+        console.warn(error)
+      }
+    }
   }
 
   async function acceptIncomingOffer(options: { skipPicker?: boolean } = {}) {
@@ -1530,16 +1543,18 @@ export const useRoomStore = defineStore('room', () => {
       }
     )
     bindLifecycle()
-    void Promise.all([getIceServers({ mode: 'turn' }), getIceServers({ mode: 'tcp' })])
+    // 信令不再等 TURN 凭证：最多等 800ms，超时先用公共 STUN，凭证到了再替换
+    const iceReady = Promise.all([getIceServers({ mode: 'turn' }), getIceServers({ mode: 'tcp' })])
       .then(([turnServers, tcpServers]) => {
         iceTurn = turnServers
         iceTcp = tcpServers
       })
-      .finally(() => {
-        if (!intentionalClose && roomCode.value === nextCode) {
-          connectSocket()
-        }
-      })
+      .catch(() => {})
+    void Promise.race([iceReady, new Promise((resolve) => setTimeout(resolve, 800))]).then(() => {
+      if (!intentionalClose && roomCode.value === nextCode) {
+        connectSocket()
+      }
+    })
   }
 
   function cleanup() {

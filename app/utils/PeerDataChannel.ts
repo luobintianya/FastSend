@@ -129,7 +129,7 @@ export class PeerDataChannel {
       this.initializeDataChannel()
     }
 
-    const tcpAfter = config.tcpAfterMs ?? 8000
+    const tcpAfter = config.tcpAfterMs ?? 4000
     if (this.tcpIceServers?.length) {
       this.tcpTimer = setTimeout(async () => {
         // 已有候选对连通（直连/中继正在当选）就不重启，避免把快成功的连接打断
