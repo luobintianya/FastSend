@@ -8,4 +8,36 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=production
+      # 必须与 coturn 的 static-auth-secret 一致
+      - NUXT_TURN_SECRET=${TURN_SECRET:?请在 .env 中设置 TURN_SECRET}
     command: node server/index.mjs
+
+  # TURN/STUN 中继：跨公网打洞失败时由它转发流量。
+  # /api/turn 会按请求域名下发 stun/turn:<域名>:443 和 :3478，
+  # 所以 coturn 必须跑在和站点域名解析到的同一台机器上。
+  coturn:
+    image: coturn/coturn:latest
+    network_mode: host   # 中继端口段很大，host 模式最省事
+    restart: unless-stopped
+    command:
+      - -n
+      - --listening-port=3478
+      - --alt-listening-port=443      # UDP/TCP 443，应对只放行 443 的网络（TCP 443 若被反代占用会自动失败，不影响 UDP）
+      - --fingerprint
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?请在 .env 中设置 TURN_SECRET}
+      - --realm=fastsend
+      - --external-ip=${TURN_EXTERNAL_IP:?请在 .env 中设置服务器公网 IP}
+      - --min-port=49160
+      - --max-port=49200
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --total-quota=100
+      - --user-quota=12
+      # 禁止中继到内网，避免被当作内网跳板
+      - --no-multicast-peers
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255

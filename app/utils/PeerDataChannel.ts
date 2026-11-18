@@ -30,6 +30,16 @@ function stripTcpCandidates(sdp?: string): string | undefined {
     .join('\r\n')
 }
 
+function chunksByteLength(chunks: Array<string | ArrayBuffer>): number {
+  let total = 0
+  for (const chunk of chunks) {
+    if (typeof chunk !== 'string') {
+      total += chunk.byteLength
+    }
+  }
+  return total
+}
+
 function concatBinary(chunks: Array<string | ArrayBuffer>): ArrayBuffer {
   const views: Uint8Array[] = []
   let total = 0
@@ -67,6 +77,7 @@ export class PeerDataChannel {
     type: string
     chunks: (string | ArrayBuffer)[]
   } = { startTime: 0, offset: 0, count: 0, type: '', chunks: [] }
+  private pendingReceiveBytes = 0
   private sendPromiseReject: ((reason?: any) => void) | null = null
   private blockSize: number
   private isInitiator: boolean
@@ -269,9 +280,15 @@ export class PeerDataChannel {
     const type = receiveData.type
     const startTime = receiveData.startTime
     receiveData.chunks = []
+    // 整条消息已收齐但还在写盘队列里排队：这部分字节仍要计入「已接收」，
+    // 否则 chunks 一清空进度就会回跳。
+    const queuedBytes = type === 'string' ? 0 : chunksByteLength(chunks)
+    this.pendingReceiveBytes += queuedBytes
     this.receiveWriteChain = this.receiveWriteChain
       .then(async () => {
         const result = type === 'string' ? await new Blob(chunks).text() : concatBinary(chunks)
+        // onReceive 会同步把字节记入上层计数，这里同时扣掉，避免重复统计
+        this.pendingReceiveBytes = Math.max(0, this.pendingReceiveBytes - queuedBytes)
         await this.onReceive(result, {
           size: type === 'string' ? (result as string).length : (result as ArrayBuffer).byteLength,
           duration: Date.now() - startTime
@@ -513,12 +530,10 @@ export class PeerDataChannel {
    * @returns 接收缓存的大小
    */
   public getReceivedBufferSize(): number {
-    return this.receiveData.chunks.reduce((size, dat) => {
-      if (typeof dat === 'string') {
-        return size + dat.length
-      }
-      return size + dat.byteLength
-    }, 0)
+    // 只统计二进制文件数据；字符串是控制消息，且 length 不等于字节数
+    const partial =
+      this.receiveData.type === 'string' ? 0 : chunksByteLength(this.receiveData.chunks)
+    return partial + this.pendingReceiveBytes
   }
 
   /**

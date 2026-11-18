@@ -6,7 +6,10 @@ const props = defineProps({
   rootLabel: { type: String, default: '' }
 })
 const selectedKey = defineModel('selectedKey', { default: {} })
-const totalFileCount = computed(() => Object.keys(props.fileMap).length)
+// 与已选数量口径一致：不把目录项（以 / 结尾）算作文件
+const totalFileCount = computed(
+  () => Object.keys(props.fileMap).filter((n) => !/\/$/.test(n)).length
+)
 const selectedFileCount = computed(
   () => Object.keys(selectedKey.value).filter((n) => !/\/$/.test(n)).length
 )

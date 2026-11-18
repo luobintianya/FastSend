@@ -43,6 +43,8 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
   const hasher = CryptoJS.algo.MD5.create()
   // syncDir 场景下，payload 中的键是去根后的，需要映射回原始文件项
   let payloadFileMap: FlatFileMap = {}
+  // 当前文件已写入通道发送缓冲的字节数（含尚未出网的部分）
+  let curFileQueuedBytes = 0
 
   const shareLink = computed(() => {
     if (!import.meta.client || !code.value) {
@@ -63,6 +65,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
     curFile.value = createSenderCurrentFileState()
     status.value = createSenderStatusState()
     payloadFileMap = {}
+    curFileQueuedBytes = 0
   }
 
   function dispose() {
@@ -81,8 +84,16 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
       return
     }
     const queued = totalTransmittedBytes.value
-    const bytes = Math.max(0, queued - (pdc?.getBufferedAmount() ?? 0))
+    const buffered = pdc?.getBufferedAmount() ?? 0
+    const bytes = Math.max(0, queued - buffered)
     displayBytes.value = bytes
+    // 发送缓冲排空过程中持续修正单文件进度，避免进度条先到 100% 而传输未完
+    if (curFileQueuedBytes > 0) {
+      curFile.value.transmittedBytes = Math.min(
+        curFile.value.size,
+        Math.max(0, curFileQueuedBytes - buffered)
+      )
+    }
     const elapsedSec = Math.max((Date.now() - startTime.value) / 1e3, 0.2)
     totalSpeed.value = speedTracker.update(bytes, elapsedSec)
     durationTimeStr.value = formatTime(Date.now() - startTime.value)
@@ -148,6 +159,7 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
         speed: 0,
         startTime: new Date().getTime()
       }
+      curFileQueuedBytes = 0
 
       const sliceSize = 1024 * 1024
       const count = Math.ceil(file.size / sliceSize)
@@ -159,20 +171,26 @@ export const useSenderTransferStore = defineStore('senderTransfer', () => {
 
         hasher.update(CryptoJS.lib.WordArray.create(ab))
         const queuedBefore = totalTransmittedBytes.value
-        const fileBefore = curFile.value.transmittedBytes
+        const fileQueuedBefore = curFileQueuedBytes
         await pdc?.sendData(ab, (sent) => {
           totalTransmittedBytes.value = queuedBefore + sent
-          curFile.value.transmittedBytes = fileBefore + sent
+          curFileQueuedBytes = fileQueuedBefore + sent
+          // 只统计实际出网的字节（减去通道发送缓冲），进度不虚高
+          curFile.value.transmittedBytes = Math.min(
+            file.size,
+            Math.max(0, curFileQueuedBytes - (pdc?.getBufferedAmount() ?? 0))
+          )
         })
         totalTransmittedBytes.value = queuedBefore + ab.byteLength
-        curFile.value.transmittedBytes = fileBefore + ab.byteLength
+        curFileQueuedBytes = fileQueuedBefore + ab.byteLength
+        curFile.value.transmittedBytes = Math.min(
+          file.size,
+          Math.max(0, curFileQueuedBytes - (pdc?.getBufferedAmount() ?? 0))
+        )
 
         const nowTime = new Date().getTime()
         const elapsed = nowTime - curFile.value.startTime
-        const sentNow = Math.max(
-          0,
-          curFile.value.transmittedBytes - (pdc?.getBufferedAmount() ?? 0)
-        )
+        const sentNow = curFile.value.transmittedBytes
         if (elapsed > 0) {
           curFile.value.speed = (curFile.value.speed + sentNow / (elapsed / 1e3)) / 2
         }
