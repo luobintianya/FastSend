@@ -85,6 +85,8 @@ export const useRoomStore = defineStore('room', () => {
   let calcSpeedJobId: ReturnType<typeof setInterval> | undefined
   let startTime = 0
   let lastSpeedAt = 0
+  // 发送方：对方回报的已接收字节（真实进度）
+  let peerAckedBytes = 0
   const speedTracker = createSpeedTracker()
   let outgoingFileMap: FlatFileMap = {}
   let incomingPayload: FilesPayload = { type: '', fileMap: {}, root: '' }
@@ -204,6 +206,7 @@ export const useRoomStore = defineStore('room', () => {
     rootDirDH = undefined
     startTime = 0
     lastSpeedAt = 0
+    peerAckedBytes = 0
     speedTracker.reset()
     transferPhase.value = 'idle'
     curFile.value = createRoomCurrentFileState()
@@ -403,7 +406,11 @@ export const useRoomStore = defineStore('room', () => {
     const link = peerLinks.get(transferPeerId)
     const queued = totalTransmittedBytes.value
     if (transferPhase.value === 'sending') {
-      return Math.max(0, queued - (link?.pdc.getBufferedAmount() ?? 0))
+      // 缓冲排空只代表交给了网络层，真实进度还要以对方回报的已接收字节为上限
+      return Math.min(
+        Math.max(0, queued - (link?.pdc.getBufferedAmount() ?? 0)),
+        peerAckedBytes
+      )
     }
     if (transferPhase.value === 'receiving') {
       return queued + (link?.pdc.getReceivedBufferSize() ?? 0)
@@ -423,6 +430,10 @@ export const useRoomStore = defineStore('room', () => {
     displayBytes.value = bytes
 
     const now = Date.now()
+    if (transferPhase.value === 'receiving' && transferPeerId) {
+      // 向发送方回报真实已接收字节，发送方据此显示进度并判断是否真正完成
+      sendTo(transferPeerId, JSON.stringify({ type: 'progress', data: bytes })).catch(() => {})
+    }
     const link = peerLinks.get(transferPeerId)
     const curBytes =
       transferPhase.value === 'sending'
@@ -684,6 +695,10 @@ export const useRoomStore = defineStore('room', () => {
     } catch (error) {
       console.warn(error)
       await closeCurFileWriter()
+      if (transferPeerId) {
+        // 通知发送方失败，避免其一直停在「传输中」
+        sendTo(transferPeerId, JSON.stringify({ type: 'err', data: -3 })).catch(console.warn)
+      }
       toast.add({ severity: 'error', summary: 'Error', detail: `${error}`, life: 5e3 })
     } finally {
       resetTransferRuntime()
@@ -799,7 +814,19 @@ export const useRoomStore = defineStore('room', () => {
 
     if (obj.type === 'reqFile') {
       transferPeerId = peerId
-      await sendFileChunks(obj.data)
+      // 不能阻塞接收链，否则对方的 progress / done 消息会被压住
+      sendFileChunks(obj.data).catch((error) => {
+        console.warn(error)
+        toast.add({ severity: 'error', summary: 'Error', detail: `${error}`, life: 5e3 })
+        resetTransferRuntime()
+      })
+      return
+    }
+
+    if (obj.type === 'progress') {
+      if (transferPeerId === peerId && transferPhase.value === 'sending') {
+        peerAckedBytes = Math.max(peerAckedBytes, Number(obj.data) || 0)
+      }
       return
     }
 
@@ -820,6 +847,8 @@ export const useRoomStore = defineStore('room', () => {
         reqFileRejecteFn?.()
         reqFileResolveFn = undefined
         reqFileRejecteFn = undefined
+        // 通知发送方失败，否则发送方会一直停在「传输中」
+        sendTo(peerId, JSON.stringify({ type: 'err', data: -3 })).catch(console.warn)
         return
       }
       await closeCurFileWriter()
@@ -830,6 +859,9 @@ export const useRoomStore = defineStore('room', () => {
     }
 
     if (obj.type === 'done') {
+      if (transferPhase.value === 'idle') {
+        return
+      }
       toast.add({
         severity: 'success',
         summary: 'Success',
@@ -852,6 +884,14 @@ export const useRoomStore = defineStore('room', () => {
         resetTransferRuntime()
       } else if (obj.data === 404) {
         toast.add({ severity: 'warn', summary: 'Warn', detail: t('hint.fileNotFound'), life: 5e3 })
+      } else if (obj.data === -3) {
+        toast.add({
+          severity: 'error',
+          summary: 'Error',
+          detail: t('hint.hashCheckFail'),
+          life: 5e3
+        })
+        resetTransferRuntime()
       } else if (obj.data === -1) {
         toast.add({
           severity: 'warn',
