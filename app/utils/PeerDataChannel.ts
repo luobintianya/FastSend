@@ -131,7 +131,23 @@ export class PeerDataChannel {
 
     const tcpAfter = config.tcpAfterMs ?? 8000
     if (this.tcpIceServers?.length) {
-      this.tcpTimer = setTimeout(() => this.upgradeIce(this.tcpIceServers!, true), tcpAfter)
+      this.tcpTimer = setTimeout(async () => {
+        // 已有候选对连通（直连/中继正在当选）就不重启，避免把快成功的连接打断
+        let working = false
+        try {
+          const stats = await this.pc.getStats()
+          stats.forEach((report) => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+              working = true
+            }
+          })
+        } catch {
+          // getStats 失败时维持原行为：升级 TCP
+        }
+        if (!working) {
+          this.upgradeIce(this.tcpIceServers!, true)
+        }
+      }, tcpAfter)
     }
   }
 
