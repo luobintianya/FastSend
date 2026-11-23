@@ -87,6 +87,8 @@ export const useRoomStore = defineStore('room', () => {
   let lastSpeedAt = 0
   // 发送方：对方回报的已接收字节（真实进度）
   let peerAckedBytes = 0
+  // 接收方：上次向对方回报进度的时间
+  let lastAckAt = 0
   const speedTracker = createSpeedTracker()
   let outgoingFileMap: FlatFileMap = {}
   let incomingPayload: FilesPayload = { type: '', fileMap: {}, root: '' }
@@ -207,6 +209,7 @@ export const useRoomStore = defineStore('room', () => {
     startTime = 0
     lastSpeedAt = 0
     peerAckedBytes = 0
+    lastAckAt = 0
     speedTracker.reset()
     transferPhase.value = 'idle'
     curFile.value = createRoomCurrentFileState()
@@ -418,6 +421,26 @@ export const useRoomStore = defineStore('room', () => {
     return queued
   }
 
+  /**
+   * 向发送方回报「已处理」的字节数（不含接收缓冲里还没处理完的尾包）。
+   * 若把缓冲也算进来，发送方会在接收端还在写盘时提前显示 100%。
+   * 由数据到达驱动，避免后台标签页定时器被节流后进度整段不动、最后一跳 100%。
+   */
+  function sendProgressAck() {
+    if (transferPhase.value !== 'receiving' || !transferPeerId) {
+      return
+    }
+    const now = Date.now()
+    if (now - lastAckAt < 100) {
+      return
+    }
+    lastAckAt = now
+    const total = totalFileSize.value
+    const processed = totalTransmittedBytes.value
+    const data = total > 0 ? Math.min(processed, total) : processed
+    sendTo(transferPeerId, JSON.stringify({ type: 'progress', data })).catch(() => {})
+  }
+
   function calcSpeedFn() {
     if (!startTime) {
       return
@@ -430,10 +453,7 @@ export const useRoomStore = defineStore('room', () => {
     displayBytes.value = bytes
 
     const now = Date.now()
-    if (transferPhase.value === 'receiving' && transferPeerId) {
-      // 向发送方回报真实已接收字节，发送方据此显示进度并判断是否真正完成
-      sendTo(transferPeerId, JSON.stringify({ type: 'progress', data: bytes })).catch(() => {})
-    }
+    sendProgressAck()
     const link = peerLinks.get(transferPeerId)
     const curBytes =
       transferPhase.value === 'sending'
@@ -558,6 +578,7 @@ export const useRoomStore = defineStore('room', () => {
   async function handleBufferData(buf: ArrayBuffer) {
     curFile.value.transmittedBytes += buf.byteLength
     totalTransmittedBytes.value += buf.byteLength
+    sendProgressAck()
     hasher.update(CryptoJS.lib.WordArray.create(buf))
     if (curFileWriter) {
       await curFileWriter.write(buf)
@@ -734,6 +755,11 @@ export const useRoomStore = defineStore('room', () => {
         return
       }
       if (isBusy.value || incomingOffer.value) {
+        // offer 会同时走信令和数据通道各来一份：同一单号的重复包不能当成新请求拒绝，
+        // 否则接收端刚接受完就自己把发送端踢掉
+        if (obj.data?.offerId === currentOfferId) {
+          return
+        }
         sendControl(peerId, {
           type: 'rejectFile',
           data: { offerId: obj.data?.offerId }
